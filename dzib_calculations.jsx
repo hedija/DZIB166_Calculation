@@ -1,8 +1,14 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
-import * as XLSX from "xlsx-js-style";
 import { supabase } from "./supabase";
 import INVOICE_CSS from "./src/invoice.css?raw";
 import "./src/dzib_calculations.css";
+import { numVardiem, renderFnText, mergeData } from "./src/calc.js";
+
+// xlsx-js-style is ~800 kB — load it lazily on first use so the initial bundle stays small
+let XLSX = null;
+async function ensureXLSX() {
+  if (!XLSX) XLSX = await import('xlsx-js-style');
+}
 
 // ─── DB helpers ────────────────────────────────────────────────────────────
 async function saveCfgDb(config) {
@@ -47,10 +53,6 @@ async function saveFnDb(footnotes) {
     }));
     await supabase.from('footnotes').upsert(rows, { onConflict: 'id' });
   } catch(e) { console.error('saveFnDb:', e); }
-}
-
-function renderFnText(text, ctx) {
-  return text.replace(/\{\{(\w+)\}\}/g, (_, k) => ctx[k] ?? `{{${k}}}`);
 }
 
 async function saveMenDb(men) {
@@ -189,61 +191,8 @@ function parseAlokatori(wb) {
     })).filter(r=>r.dz);
 }
 
-// ─── Merge + PVN calc ──────────────────────────────────────────────────────
-function mergeData(atskaite, alokData, config) {
-  const am = {}; for (const a of alokData) am[a.dz]=a;
-  return atskaite.apartments.map(apt => {
-    const al=am[apt.dz]||{}, cfg=config[apt.dz]||{};
-    const cenaM2=al.cenaM2??0;
-    const totalArea=cfg.area??0;
-    const heatedArea=al.platiba??cfg.heatedArea??totalArea;
-    const cenaV=al.cenaVieniba??0, alokV=al.alokVienibas??0;
-    const pvn=al.pvnLikme??0, pvnK=1+pvn/100;
-    return { ...apt, area:totalArea, heatedArea, residents:cfg.residents??0, email:cfg.email??"",
-      owner:cfg.owner||apt.owner, irnieks:al.irnieks??(cfg.owner||apt.owner), ligums:al.ligums??"",
-      cenaM2, cenaVieniba:cenaV, alokVienibas:alokV, pvnLikme:pvn,
-      cenaM2ArPVN:cenaM2*pvnK, cenaVienArPVN:cenaV*pvnK,
-      maksPlatibaiArPVN:cenaM2*heatedArea*pvnK,
-      maksVienibamArPVN:cenaV*alokV*pvnK,
-      kopsumma:cenaM2*heatedArea*pvnK+cenaV*alokV*pvnK };
-  });
-}
-
 // ─── Excel builder ─────────────────────────────────────────────────────────
 function fmt(ws,f,r1,c1,r2,c2){ for(let r=r1;r<=r2;r++)for(let c=c1;c<=c2;c++){const a=XLSX.utils.encode_cell({r,c});if(ws[a]&&ws[a].t==="n")ws[a].z=f;}}
-
-function numVardiem(amount) {
-  const cents = Math.round(amount * 100);
-  const eur = Math.floor(cents / 100);
-  const cnt = cents % 100;
-  const ones  = ["","viens","divi","trīs","četri","pieci","seši","septiņi","astoņi","deviņi"];
-  const teens = ["desmit","vienpadsmit","divpadsmit","trīspadsmit","četrpadsmit","piecpadsmit",
-                 "sešpadsmit","septiņpadsmit","astoņpadsmit","deviņpadsmit"];
-  const tns   = ["","","divdesmit","trīsdesmit","četrdesmit","piecdesmit",
-                 "sešdesmit","septiņdesmit","astoņdesmit","deviņdesmit"];
-  function nn(n) {
-    if (!n) return "";
-    if (n < 10) return ones[n];
-    if (n < 20) return teens[n - 10];
-    const t = Math.floor(n / 10), o = n % 10;
-    return tns[t] + (o ? " " + ones[o] : "");
-  }
-  function nnn(n) {
-    const h = Math.floor(n / 100), re = n % 100;
-    const hs = h === 1 ? "simts" : h > 1 ? ones[h] + " simti" : "";
-    const tail = nn(re);
-    return hs + (hs && tail ? " " : "") + tail;
-  }
-  let s;
-  if (eur === 0) s = "nulle eiro";
-  else if (eur < 1000) s = nnn(eur) + " eiro";
-  else {
-    const th = Math.floor(eur / 1000), re = eur % 1000;
-    s = (th === 1 ? "tūkstotis" : nn(th) + " tūkstoši") + (re ? " " + nnn(re) : "") + " eiro";
-  }
-  s += cnt === 0 ? " 00 centu" : " " + String(cnt).padStart(2, "0") + " centi";
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
 
 function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, company, footnotes) {
   const {period}=atskaite, merged=mergeData(atskaite,alokData,config), wb=XLSX.utils.book_new();
@@ -411,8 +360,8 @@ function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, comp
       const fApkAlok= men.heatingIncluded ? `Σ (alok. vien. × tarifs ar PVN, ${men.heatingAllocPct||60}%)` : "—";
 
       // Section 2 formula descriptions (what is included in Aprēķinātais)
-      const f2Water = `Aukstais ūdens + KŪ ūdens daļa (×${tAU.toFixed(4)} €/m³) + Lietus`;
-      const f2Heat  = `Cirkulācija + Apkure + KŪ uzsildīšana (×${r(tKU-tAU).toFixed(4)} €/m³)`;
+      const f2Water = "Aukstais ūdens + Karstais ūdens + Lietus notekūdeņi";
+      const f2Heat  = "Cirkulācija + Apkure (kopējā + patēriņš) + Siltmezgls";
       const f2Waste = `Rēķins ÷ ${totalPersonas} personas`;
       const f2Elec  = `Rēķins ÷ 12 × ${nApts} dzīvokļi`;
 
@@ -767,18 +716,40 @@ function _buildInvoiceBlocks(atskaite, alokData, config, men, cirkulTarif, pozic
           <td class="r">${typeof l.summa==="number"?l.summa.toFixed(2):esc(String(l.summa))}</td>
         </tr>`).join("");
 
-    blocks.push({ invoiceNr, aptDz: apt.dz,
-      owner: name,
-      periodYear: parseInt(gadam),
-      periodMonth: parseInt(mesCipars),
+    const dzFnOff = new Set(cfg.footnotesDisabled || []);
+    const nDz = merged.length || 1;
+    const fnCtx = {
+      waste: (parseFloat(men.waste)||0).toFixed(2), commonElec: (parseFloat(men.commonElec)||0).toFixed(2),
+      commonElecKwh: men.commonElecKwh || '', heat: (parseFloat(men.heat)||0).toFixed(2),
+      water: (parseFloat(men.water)||0).toFixed(2), monthName: men.monthName || '', year: men.year || '',
+      residents: String(apt.residents || 0), rAtk: rAtk.toFixed(2), kopsumma: kopsumma.toFixed(2),
+      waterM3: (apt.auKopa + apt.kuKopa).toFixed(3), waterEur: (rAU + rKU).toFixed(2),
+      heatMwh: men.heatMwh || '',
+      heatAlok: (apt.alokVienibas || 0).toFixed(4), heatEur: (rApkM2 + rApkAlok).toFixed(2),
+      elecKwh: ((parseFloat(men.commonElecKwh)||0) / nDz).toFixed(1),
+      elecEur: rKoplEl.toFixed(2), wasteEur: rAtk.toFixed(2),
+    };
+    const renderedFootnotes = (footnotes||[])
+      .filter(fn => fn.is_on && !dzFnOff.has(fn.id))
+      .map(fn => ({ marker: fn.marker, text: renderFnText(fn.text, fnCtx) }));
+    const fnHtml = renderedFootnotes
+      .map(fn => `<p class="fn">${esc(fn.marker)} ${esc(fn.text)}</p>`).join('\n');
+
+    blocks.push({
+      invoiceNr, aptDz: apt.dz, owner: name,
+      periodYear: parseInt(gadam), periodMonth: parseInt(mesCipars),
       paymentDue: termiņš,
       totalEur: Math.round(kopsumma * 100) / 100,
       lines: lines.map(l => ({ nos: l.nos, mv: l.mv, daudz: l.daudz, cena: l.cena, summa: l.summa })),
+      dateTxt, period1Txt, periodTxt, wordsText: numVardiem(kopsumma),
+      supplier: { nos: PIEG_NOS, addr: PIEG_ADDR, reg: PIEG_REG, bank: PIEG_BANK, swift: PIEG_SWIFT, konts: PIEG_KONTS },
+      recipientAddress: `${PIEG_ADDR}, dz. ${apt.dz}`,
+      renderedFootnotes,
       html: `
 <div class="inv">
   <div class="hdr-row">
     <span>${esc(dateTxt)}</span>
-    <strong>Rēķins Nr. ${esc(invoiceNr)}</strong>
+    <strong class="inv-nr">Rēķins Nr. ${esc(invoiceNr)}</strong>
   </div>
   <table class="parties">
     <tr><td class="ph">Piegādātājs:</td><td class="ph">Saņēmējs:</td></tr>
@@ -809,29 +780,7 @@ function _buildInvoiceBlocks(atskaite, alokData, config, men, cirkulTarif, pozic
     <strong>${kopsumma.toFixed(2)}</strong>
   </div>
   <p class="words">Summa vārdiem: ${esc(numVardiem(kopsumma))}</p>
-  ${(() => {
-    const dzFnOff = new Set(cfg.footnotesDisabled || []);
-    const nDz = merged.length || 1;
-    const fnCtx = {
-      waste: (parseFloat(men.waste)||0).toFixed(2),
-      commonElec: (parseFloat(men.commonElec)||0).toFixed(2),
-      commonElecKwh: men.commonElecKwh || '',
-      heat: (parseFloat(men.heat)||0).toFixed(2),
-      water: (parseFloat(men.water)||0).toFixed(2),
-      monthName: men.monthName || '', year: men.year || '',
-      residents: String(apt.residents || 0),
-      rAtk: rAtk.toFixed(2), kopsumma: kopsumma.toFixed(2),
-      waterM3: (apt.auKopa + apt.kuKopa).toFixed(3),
-      waterEur: (rAU + rKU).toFixed(2),
-      heatAlok: (apt.alokVienibas || 0).toFixed(4),
-      heatEur: (rApkM2 + rApkAlok).toFixed(2),
-      elecKwh: ((parseFloat(men.commonElecKwh)||0) / nDz).toFixed(1),
-      elecEur: rKoplEl.toFixed(2),
-      wasteEur: rAtk.toFixed(2),
-    };
-    return (footnotes||[]).filter(fn=>fn.is_on && !dzFnOff.has(fn.id))
-      .map(fn=>`<p class="fn">${esc(fn.marker)} ${esc(renderFnText(fn.text, fnCtx))}</p>`).join('\n');
-  })()}
+  ${fnHtml}
   <div class="inv-footer">
     <p class="sig">Rēķins sagatavots elektroniski un derīgs bez paraksta.</p>
     ${logo ? `<img class="inv-logo" src="${logo}" alt="Brīvības 166"/>` : ''}
@@ -1027,6 +976,12 @@ export default function App({ onBack }) {
   const [config,      setConfig]      = useState({});
   const [done,        setDone]        = useState(false);
   const [errPdf,      setErrPdf]      = useState("");
+  const [emailSettings, setEmailSettings] = useState({
+    subject: 'Rēķins Nr. {{invoiceNr}} par {{period}}, {{dz}}',
+    body: '<p>Labdien, <strong>{{owner}}</strong>!</p>\n<p>Pievienots rēķins <strong>Nr. {{invoiceNr}}</strong> par <strong>{{period}}</strong>.</p>\n<p>Kopējā summa: <strong>{{kopsumma}} EUR</strong>.<br>Apmaksas termiņš: <strong>{{paymentDue}}</strong>.</p>\n<p>Ar cieņu <br>DZĪB Brīvības 166 Pārvaldnieks</p>',
+  });
+  const [emailSending,  setEmailSending]  = useState(false);
+  const [emailProgress, setEmailProgress] = useState({ sent: 0, total: 0, errors: [], noEmail: [] });
   const [pozicijas,   setPozicijas]   = useState(() => DEFAULT_POZICIJAS.map(p => ({...p, on: true})));
   const [activePanel,    setActivePanel]    = useState(null); // 'cfg'|'poz'|'fn'|'comp'|null
   const [expandedDz,     setExpandedDz]     = useState(null);
@@ -1072,6 +1027,9 @@ export default function App({ onBack }) {
     // Zemsvītras piezīmes
     supabase.from('footnotes').select('*').order('sort_order')
       .then(({ data }) => { if (data) setFootnotes(data); });
+    // Epasta iestatījumi
+    supabase.from('settings').select('value').eq('key', 'email_settings').maybeSingle()
+      .then(({ data }) => { if (data?.value) setEmailSettings(prev => ({ ...prev, ...data.value })); });
   }, []);
 
   const saveMen = (newMen) => { saveMenDb(newMen); };
@@ -1090,6 +1048,7 @@ export default function App({ onBack }) {
   const processF1 = useCallback(async f => {
     setErr1(""); setDone(false);
     try {
+      await ensureXLSX();
       const r = parseAtskaite(await readWb(f), company.buildingId || "");
       const cfgIds = Object.keys(config);
       const cfgSet = new Set(cfgIds);
@@ -1120,6 +1079,7 @@ export default function App({ onBack }) {
   const processF2 = useCallback(async f => {
     setErr2(""); setDone(false);
     try {
+      await ensureXLSX();
       const r = parseAlokatori(await readWb(f));
       const cfgIds = Object.keys(config);
       const cfgSet = new Set(cfgIds);
@@ -1250,8 +1210,115 @@ export default function App({ onBack }) {
   };
   const togglePozId = (id) => updatePoz(pozicijas.map(p => p.id===id ? {...p,on:!p.on} : p));
 
-  const handleGenerate = () => {
+  const saveEmailSettings = (upd) => {
+    const next = upd ? { ...emailSettings, ...upd } : emailSettings;
+    if (upd) setEmailSettings(next);
+    supabase.from('settings').upsert({ key: 'email_settings', value: next }).catch(e => console.error('saveEmailSettings:', e));
+  };
+
+  const handleSendEmails = async () => {
+    if (!atskaite || !alokData) return;
+
+    // ── 1. Pārbaudīt vai rēķini jau uzģenerēti ──
+    const periodYear  = parseInt(men.year  || new Date().getFullYear());
+    const periodMonth = parseInt(men.monthNum || (new Date().getMonth() + 1));
+    const periodLabel = `${periodYear}-${String(periodMonth).padStart(2, '0')}`;
+
+    const { data: existing } = await supabase
+      .from('issued_invoices').select('id')
+      .eq('period_year', periodYear).eq('period_month', periodMonth).limit(1);
+
+    const alreadyGenerated = Array.isArray(existing) && existing.length > 0;
+
+    if (!alreadyGenerated) {
+      if (!window.confirm(`Rēķini par ${periodLabel} vēl nav uzģenerēti.\nVai uzģenerēt un lejupielādēt PDF rēķinus tagad?`))
+        return;
+      const ok = await handleGeneratePdf();
+      if (!ok) return;
+    }
+
+    if (!window.confirm(`Izsūtīt rēķinus par ${periodLabel} uz norādītajām epasta adresēm?`))
+      return;
+
+    // ── 2. Sagatavot ──
+    setEmailSending(true);
+    setEmailProgress({ sent: 0, total: 0, errors: [], noEmail: [] });
+    setErrPdf("");
+
+    let logo = null;
+    try {
+      const resp = await fetch('/' + (company.logoPath || 'Brivibas166logo.jpg'));
+      const blob = await resp.blob();
+      logo = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
+    } catch { logo = null; }
+
+    let blocks;
+    try {
+      ({ blocks } = _buildInvoiceBlocks(atskaite, alokData, config, men, effCirkulTarif, pozicijas, logo, company, footnotes));
+    } catch(e) { setErrPdf(e.message); setEmailSending(false); return; }
+
+    let pdfLib, InvoiceDoc;
+    try {
+      [pdfLib, { InvoiceDocument: InvoiceDoc }] = await Promise.all([
+        import('@react-pdf/renderer'),
+        import('./src/InvoicePdf.jsx'),
+      ]);
+    } catch(e) { setErrPdf("PDF bibliotēka nav pieejama: " + e.message); setEmailSending(false); return; }
+
+    const blocksWithEmail = blocks.filter(b => (config[b.aptDz]?.email || '').trim());
+    const noEmail = blocks.filter(b => !(config[b.aptDz]?.email || '').trim()).map(b => b.aptDz);
+
+    setEmailProgress({ sent: 0, total: blocksWithEmail.length, errors: [], noEmail });
+
+    // ── 3. Sūtīt ──
+    let sent = 0;
+    for (const block of blocksWithEmail) {
+      const toEmail = (config[block.aptDz]?.email || '').trim();
+      const emailCtx = {
+        owner: block.owner, invoiceNr: block.invoiceNr,
+        period: block.period1Txt, dz: block.aptDz,
+        kopsumma: block.totalEur.toFixed(2), paymentDue: block.paymentDue,
+      };
+      try {
+        const el = React.createElement(InvoiceDoc, { blocks: [block], logo });
+        const pdfBlob = await pdfLib.pdf(el).toBlob();
+        const pdfBase64 = await new Promise(res => {
+          const r = new FileReader(); r.onloadend = () => res(r.result.split(',')[1]); r.readAsDataURL(pdfBlob);
+        });
+        const { error } = await supabase.functions.invoke('send-invoice', {
+          body: {
+            to: toEmail,
+            subject: renderFnText(emailSettings.subject, emailCtx),
+            html:    renderFnText(emailSettings.body,    emailCtx),
+            pdfBase64,
+            filename: `Rekins_${block.invoiceNr}-${block.aptDz}.pdf`,
+          },
+        });
+        if (error) {
+          let msg = error.message;
+          try {
+            const txt = await error.context?.text?.();
+            if (txt) { const j = JSON.parse(txt); if (j?.error) msg = j.error; }
+          } catch {}
+          throw new Error(msg);
+        }
+        sent++;
+        setEmailProgress(prev => ({ ...prev, sent }));
+      } catch(e) {
+        const msg = e.message?.includes('Failed to send a request')
+          ? `Dz. ${block.aptDz}: Edge Function nav pieejama — vai funkcija ir deploy-ota? (supabase functions deploy send-invoice)`
+          : `Dz. ${block.aptDz} (${toEmail}): ${e.message}`;
+        setEmailProgress(prev => ({ ...prev, errors: [...prev.errors, msg] }));
+      }
+      await new Promise(r => setTimeout(r, 300));
+    }
+
+    setEmailSending(false);
+  };
+
+  const handleGenerate = async () => {
     if(!atskaite||!alokData) return;
+    await ensureXLSX();
     const periodClean = atskaite.period.trim().replace(/\s*-\s*/g,"-");
     const parts = periodClean.split("-");
     const yyyy = parts[0]?.padStart(4,"0") || "0000";
@@ -1276,37 +1343,37 @@ export default function App({ onBack }) {
       ({ blocks } = _buildInvoiceBlocks(atskaite, alokData, config, men, effCirkulTarif, pozicijas, logo, company, footnotes));
     } catch(e) {
       setErrPdf(e.message);
-      return;
+      return false;
     }
 
-    let html2pdf;
+    let pdfLib, InvoiceDoc;
     try {
-      ({ default: html2pdf } = await import('html2pdf.js'));
+      [pdfLib, { InvoiceDocument: InvoiceDoc }] = await Promise.all([
+        import('@react-pdf/renderer'),
+        import('./src/InvoicePdf.jsx'),
+      ]);
     } catch(e) {
-      setErrPdf("html2pdf.js nav pieejams: " + e.message);
-      return;
+      setErrPdf("PDF bibliotēka nav pieejama: " + e.message);
+      return false;
     }
 
-    for (const { invoiceNr, aptDz, html } of blocks) {
-      // Inline the <style> tag with the content — html2pdf sets innerHTML on a div,
-      // which strips <html>/<head>/<body> tags and loses any <style> in <head>.
-      const fullHtml = `<style>${INVOICE_CSS}</style>${html}`;
+    for (const block of blocks) {
       try {
-        await html2pdf()
-          .set({
-            margin: [10, 10, 10, 10],
-            filename: `Rekins_${invoiceNr}-${aptDz}.pdf`,
-            image: { type: 'jpeg', quality: 0.98 },
-            html2canvas: { scale: 2, useCORS: true, logging: false, letterRendering: true },
-            jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-          })
-          .from(fullHtml, 'string')
-          .save();
+        const el = React.createElement(InvoiceDoc, { blocks: [block], logo });
+        const blob = await pdfLib.pdf(el).toBlob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `Rekins_${block.invoiceNr}-${block.aptDz}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
       } catch(e) {
-        setErrPdf(`${aptDz}: ${e.message}`);
-        return;
+        setErrPdf(`${block.aptDz}: ${e.message}`);
+        return false;
       }
-      await new Promise(r => setTimeout(r, 600));
+      await new Promise(r => setTimeout(r, 300));
     }
 
     // Save all invoices to DB after successful PDF generation
@@ -1323,6 +1390,7 @@ export default function App({ onBack }) {
       }));
       await supabase.from('issued_invoices').upsert(rows, { onConflict: 'invoice_nr' });
     } catch(e) { console.error('saveInvoicesDb:', e); }
+    return true;
   };
 
   // Siltums calc — KŪ no mājas kopējā skaitītāja "Brīvības iela 166"
@@ -1454,10 +1522,11 @@ export default function App({ onBack }) {
               {/* ── Panel tabs ── */}
               <div className="panel-tabs">
                 {[
-                  {id:'cfg',  icon:'🏠', label:'Dzīvokļu konfigurācija'},
-                  {id:'poz',  icon:'📋', label:'Rēķinu pozīcijas'},
-                  {id:'fn',   icon:'📝', label:'Zemsvītras piezīmes'},
-                  {id:'comp', icon:'🏢', label:'Uzņēmuma rekvizīti'},
+                  {id:'cfg',   icon:'🏠', label:'Dzīvokļu konfigurācija'},
+                  {id:'poz',   icon:'📋', label:'Rēķinu pozīcijas'},
+                  {id:'fn',    icon:'📝', label:'Zemsvītras piezīmes'},
+                  {id:'comp',  icon:'🏢', label:'Uzņēmuma rekvizīti'},
+                  {id:'email', icon:'✉', label:'Epasta iestatījumi'},
                 ].map(t => (
                   <button key={t.id}
                     className={`panel-tab${activePanel===t.id?' active':''}`}
@@ -1586,24 +1655,42 @@ export default function App({ onBack }) {
               {/* ── Rēķinu pozīcijas panel ── */}
               {activePanel==='poz' && (
                 <div className="panel-body" style={{padding:"14px 16px"}}>
-                  <div style={{fontWeight:700,fontSize:11,color:"#1F4E79",marginBottom:6,textTransform:"uppercase",letterSpacing:".5px"}}>Rēķinu pozīcijas un to kārtošana</div>
+                  <div style={{fontWeight:700,fontSize:11,color:"#1F4E79",marginBottom:4,textTransform:"uppercase",letterSpacing:".5px"}}>Rēķinu pozīcijas un to kārtošana</div>
                   <div style={{fontSize:11,color:"#7a9ab5",marginBottom:10}}>Mainiet secību ar ▲▼. Noņemiet atzīmi — pozīcija netiks iekļauta nevienā rēķinā.</div>
-                  {pozicijas.map((p,i)=>(
-                    <div key={p.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",
-                      borderRadius:6,background:p.on?"#f7fafd":"#fafafa",border:"1px solid #e0eaf2",marginBottom:4}}>
-                      <input type="checkbox" checked={p.on} onChange={()=>togglePozId(p.id)}
-                        style={{width:15,height:15,cursor:"pointer",accentColor:"#2E75B6"}}/>
-                      <span style={{flex:1,fontSize:13,color:p.on?"#1a2733":"#aab8c5",fontWeight:p.on?500:400}}>{p.label}</span>
-                      <button onClick={()=>movePoz(i,-1)} disabled={i===0}
-                        style={{background:"none",border:"1px solid #c8dce8",borderRadius:4,width:22,height:22,
-                          cursor:i===0?"not-allowed":"pointer",color:i===0?"#ccc":"#1F4E79",fontSize:11,
-                          display:"flex",alignItems:"center",justifyContent:"center"}}>▲</button>
-                      <button onClick={()=>movePoz(i,1)} disabled={i===pozicijas.length-1}
-                        style={{background:"none",border:"1px solid #c8dce8",borderRadius:4,width:22,height:22,
-                          cursor:i===pozicijas.length-1?"not-allowed":"pointer",color:i===pozicijas.length-1?"#ccc":"#1F4E79",fontSize:11,
-                          display:"flex",alignItems:"center",justifyContent:"center"}}>▼</button>
-                    </div>
-                  ))}
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                    <thead>
+                      <tr style={{background:"#1F4E79",color:"#fff"}}>
+                        <th style={{width:36,padding:"7px 10px",textAlign:"center",fontWeight:600,fontSize:11,letterSpacing:".3px"}}>#</th>
+                        <th style={{width:48,padding:"7px 8px",textAlign:"center",fontWeight:600,fontSize:11}}>Aktīva</th>
+                        <th style={{padding:"7px 12px",textAlign:"left",fontWeight:600,fontSize:11}}>Pozīcija</th>
+                        <th style={{width:60,padding:"7px 8px",textAlign:"center",fontWeight:600,fontSize:11}}>Kārtot</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pozicijas.map((p,i)=>(
+                        <tr key={p.id} style={{background:i%2===0?(p.on?"#f7fafd":"#f5f5f5"):(p.on?"#eef4fb":"#efefef"),borderBottom:"1px solid #dde8f2",transition:"background .15s"}}>
+                          <td style={{textAlign:"center",padding:"6px 10px",color:"#7a9ab5",fontSize:11,fontWeight:600}}>{i+1}</td>
+                          <td style={{textAlign:"center",padding:"6px 8px"}}>
+                            <input type="checkbox" checked={p.on} onChange={()=>togglePozId(p.id)}
+                              style={{width:15,height:15,cursor:"pointer",accentColor:"#2E75B6"}}/>
+                          </td>
+                          <td style={{padding:"6px 12px",color:p.on?"#1a2733":"#aab8c5",fontWeight:p.on?500:400}}>{p.label}</td>
+                          <td style={{textAlign:"center",padding:"4px 6px"}}>
+                            <div style={{display:"flex",gap:3,justifyContent:"center"}}>
+                              <button onClick={()=>movePoz(i,-1)} disabled={i===0} title="Pārvietot augstāk"
+                                style={{background:i===0?"#f0f4f8":"#2E75B6",border:"none",borderRadius:4,width:24,height:24,
+                                  cursor:i===0?"not-allowed":"pointer",color:i===0?"#c0cdd8":"#fff",fontSize:12,
+                                  display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>▲</button>
+                              <button onClick={()=>movePoz(i,1)} disabled={i===pozicijas.length-1} title="Pārvietot zemāk"
+                                style={{background:i===pozicijas.length-1?"#f0f4f8":"#2E75B6",border:"none",borderRadius:4,width:24,height:24,
+                                  cursor:i===pozicijas.length-1?"not-allowed":"pointer",color:i===pozicijas.length-1?"#c0cdd8":"#fff",fontSize:12,
+                                  display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>▼</button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
 
@@ -1661,6 +1748,65 @@ export default function App({ onBack }) {
                       </div>
                     ))
                   }
+                </div>
+              )}
+
+              {/* ── Epasta iestatījumi panel ── */}
+              {activePanel==='email' && (
+                <div className="panel-body" style={{padding:"14px 16px"}}>
+                  <div style={{fontWeight:700,fontSize:11,color:"#1F4E79",marginBottom:4,textTransform:"uppercase",letterSpacing:".5px"}}>Epasta iestatījumi</div>
+                  <div style={{fontSize:11,color:"#7a9ab5",marginBottom:12}}>
+                    Rēķins tiek pievienots kā PDF pielikums. Epastu adrese katram dzīvoklim — dzīvokļu konfigurācijā.
+                  </div>
+
+                  <div style={{marginBottom:10}}>
+                    <div style={{fontWeight:600,fontSize:11,color:"#1F4E79",marginBottom:4}}>Temats (Subject)</div>
+                    <input type="text" value={emailSettings.subject}
+                      onChange={e => setEmailSettings(prev => ({...prev, subject: e.target.value}))}
+                      onBlur={() => saveEmailSettings()}
+                      style={{width:"100%",padding:"6px 8px",border:"1px solid #c8dce8",borderRadius:5,fontSize:12,boxSizing:"border-box"}}
+                      placeholder="Rēķins Nr. {{invoiceNr}} par {{period}}" />
+                  </div>
+
+                  <div style={{marginBottom:10}}>
+                    <div style={{fontWeight:600,fontSize:11,color:"#1F4E79",marginBottom:4}}>Epasta teksts (HTML)</div>
+                    <textarea value={emailSettings.body}
+                      onChange={e => setEmailSettings(prev => ({...prev, body: e.target.value}))}
+                      onBlur={() => saveEmailSettings()}
+                      rows={8}
+                      style={{width:"100%",padding:"6px 8px",border:"1px solid #c8dce8",borderRadius:5,fontSize:11,fontFamily:"monospace",resize:"vertical",boxSizing:"border-box"}} />
+                  </div>
+
+                  <div style={{background:"#f0f5fa",borderRadius:6,padding:"8px 12px",fontSize:10.5,color:"#445"}}>
+                    <div style={{fontWeight:700,marginBottom:5,color:"#1F4E79"}}>Pieejamie mainīgie:</div>
+                    <table style={{borderCollapse:"collapse",width:"100%"}}>
+                      <tbody>
+                        {[
+                          ["{{owner}}",      "Dzīvokļa īpašnieka vārds"],
+                          ["{{invoiceNr}}", "Rēķina numurs"],
+                          ["{{period}}",     "Pakalpojumu periods"],
+                          ["{{dz}}",         "Dzīvokļa numurs"],
+                          ["{{kopsumma}}",   "Kopējā summa (EUR)"],
+                          ["{{paymentDue}}", "Apmaksas termiņš"],
+                        ].map(([ph, desc]) => (
+                          <tr key={ph}>
+                            <td style={{padding:"2px 8px 2px 0",whiteSpace:"nowrap"}}>
+                              <code style={{background:"#ddeaf8",padding:"1px 5px",borderRadius:3,fontSize:10,color:"#1F4E79"}}>{ph}</code>
+                            </td>
+                            <td style={{padding:"2px 0",color:"#556"}}>{desc}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div style={{marginTop:12,padding:"8px 12px",background:"#fff8e1",borderRadius:6,border:"1px solid #ffe082",fontSize:10.5,color:"#7a5800"}}>
+                    <b>Uzstādīšana:</b> Supabase Dashboard → Settings → Edge Functions → Secrets:<br/>
+                    <code style={{fontSize:10}}>GMAIL_USER</code> — Gmail adrese (no kuras sūta)<br/>
+                    <code style={{fontSize:10}}>GMAIL_APP_PASSWORD</code> — Gmail App Password (Google konts → Drošība → Lietotnes paroles)<br/>
+                    <code style={{fontSize:10}}>GMAIL_FROM_NAME</code> — Sūtītāja vārds (piem., "Brīvības 166 pārvaldnieks")<br/>
+                    <br/>Funkcija jāizdeplojē: <code style={{fontSize:10}}>supabase functions deploy send-invoice</code>
+                  </div>
                 </div>
               )}
 
@@ -2279,8 +2425,26 @@ export default function App({ onBack }) {
                       <span style={{fontSize:18}}>🖨</span>
                       Ģenerēt PDF rēķinus
                     </button>
+                    <button className="btn-secondary" disabled={!atskaite||!alokData||emailSending} onClick={handleSendEmails}
+                      style={{background: emailSending ? "#c8dce8" : undefined}}>
+                      <span style={{fontSize:18}}>✉</span>
+                      {emailSending ? `Sūta ${emailProgress.sent}/${emailProgress.total}...` : "Izsūtīt rēķinus"}
+                    </button>
                   </div>
                   {done && <div className="status st-ok">✅ Fails lejupielādēts! · {merged.length} dzīvokļi · {atskaite?.period}</div>}
+                  {!emailSending && emailProgress.total > 0 && (
+                    <div className={emailProgress.errors.length > 0 ? "status st-err" : "status st-ok"}>
+                      {emailProgress.errors.length === 0
+                        ? `✅ Nosūtīts ${emailProgress.sent}/${emailProgress.total} rēķini`
+                        : `⚠ Nosūtīts ${emailProgress.sent}/${emailProgress.total}`}
+                      {emailProgress.errors.map((e,i) => <div key={i} style={{fontSize:10.5,marginTop:2}}>{e}</div>)}
+                      {emailProgress.noEmail.length > 0 && (
+                        <div style={{fontSize:10.5,marginTop:3,color:"#888",borderTop:"1px solid #ddd",paddingTop:3}}>
+                          Nav epasta adreses: dz. {emailProgress.noEmail.join(', ')} — pievienot dzīvokļu konfigurācijā
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {errPdf && <div className="status st-err">⚠ PDF kļūda: {errPdf}</div>}
                   {(!atskaite||!alokData) && (
                     <div className="status st-warn">

@@ -85,7 +85,7 @@ function App() {
         <div className="section-inner">
           <h2 className="section-title">Rēķinu sagatavošana</h2>
           <p className="section-sub">
-            Katru mēnesi sagatavosam precīzus rēķinus par mājas apsaimniekošanas
+            Katru mēnesi sagatavosim precīzus rēķinus par mājas apsaimniekošanas
             pakalpojumiem. Rēķini atspoguļo reālos izdevumus un ir pieejami digitālā
             formātā.
           </p>
@@ -101,7 +101,7 @@ function App() {
               <div className="invoice-icon">🔧</div>
               <div>
                 <h4>Apsaimniekošanas maksa</h4>
-                <p>Mājas kopīpašuma uzturēšana, tīrīšana, atkritumu izvešana.</p>
+                <p>Mājas kopīpašuma uzturēšana, tīrīšana.</p>
               </div>
             </div>
             <div className="invoice-item">

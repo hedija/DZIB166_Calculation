@@ -1,23 +1,79 @@
 @page { size: A4 portrait; margin: 10mm; }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: 'Times New Roman', Times, serif; font-size: 8.5pt; line-height: 1.15; color: #000; }
+body { font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; font-size: 7.5pt; line-height: 1.2; color: #111; }
+
+/* ── Page wrapper ── */
 .inv { page-break-after: always; }
 .inv:last-child { page-break-after: avoid; }
-.hdr-row { display: flex; justify-content: space-between; margin-bottom: 4pt; font-size: 8.5pt; }
-.parties { width: 100%; border-collapse: collapse; margin-bottom: 5pt; }
-.parties td { width: 50%; vertical-align: top; padding: 0.3pt 0; font-size: 8pt; }
-.ph { font-weight: bold; }
-.pl { margin: 1pt 0; font-size: 8pt; }
-.lines { width: 100%; border-collapse: collapse; margin: 4pt 0; font-size: 8pt; }
-.lines th { background: #eee; border: 0.5pt solid #999; padding: 1pt 3pt; text-align: left; }
-.lines td { border: 0.5pt solid #ccc; padding: 1pt 3pt; }
-.lines .grp td { background: #f5f5f5; font-weight: bold; }
+
+/* ── Header ── */
+.hdr-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 4pt;
+  border-bottom: 0.5pt solid #ccc;
+  padding-bottom: 3pt;
+}
+.hdr-row > span { font-size: 7.5pt; color: #555; }
+.inv-nr { font-size: 11pt; font-weight: 700; color: #000; letter-spacing: 0.2pt; }
+
+/* ── Parties ── */
+.parties { width: 100%; border-collapse: collapse; margin-bottom: 3pt; }
+.parties td { width: 50%; vertical-align: top; padding: 0.4pt 0; font-size: 7.5pt; }
+.parties td:first-child { padding-right: 8pt; }
+.parties td:last-child  { padding-left: 8pt; border-left: 0.5pt solid #ddd; }
+.ph { font-weight: 700; font-size: 7pt; text-transform: uppercase; letter-spacing: 0.4pt; color: #333; display: block; margin-bottom: 1.5pt; }
+.pl { font-size: 7.5pt; margin: 0.5pt 0; display: block; }
+
+/* ── Lines table ── */
+.lines { width: 100%; border-collapse: collapse; margin: 3pt 0 2pt; }
+.lines th {
+  background: #efefef;
+  border: 0.5pt solid #bbb;
+  padding: 1.5pt 3pt;
+  font-size: 7pt;
+  font-weight: 700;
+  text-align: left;
+}
+.lines th:nth-child(1) { width: 45%; }
+.lines th:nth-child(2) { width:  9%; }
+.lines th:nth-child(3) { width: 12%; }
+.lines th:nth-child(4) { width: 18%; }
+.lines th:nth-child(5) { width: 16%; }
+.lines td { border: 0.5pt solid #ccc; padding: 0.75pt 3pt; font-size: 7.5pt; }
+.lines .grp td { font-weight: 700; font-size: 7pt; padding: 1.5pt 3pt; background: #f8f8f8; }
 .c { text-align: center; }
 .r { text-align: right; }
-.total-row { display: flex; justify-content: space-between; border-top: 1.5pt solid #000;
-  padding: 2pt 0; margin-top: 1pt; font-weight: bold; font-size: 9.5pt; }
-.words { margin-top: 2pt; font-style: italic; font-size: 8pt; }
-.fn { font-size: 7pt; color: #444; margin-top: 1.5pt; }
-.inv-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 4pt; }
-.sig { font-size: 7.5pt; color: #555; }
-.inv-logo { height: 60pt; width: auto; opacity: 0.85; }
+
+/* ── Total ── */
+.total-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  border-top: 2pt solid #000;
+  border-bottom: 0.5pt solid #000;
+  padding: 2pt 3pt;
+  margin-top: 1pt;
+  font-weight: 700;
+  font-size: 9pt;
+  color: #000;
+}
+
+/* ── Amount in words ── */
+.words { font-style: italic; font-size: 7pt; margin: 1.5pt 3pt 1pt; color: #333; }
+
+/* ── Footnotes ── */
+.fn { font-size: 6.5pt; color: #555; margin-top: 1pt; line-height: 1.2; }
+
+/* ── Footer ── */
+.inv-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 4pt;
+  border-top: 0.5pt solid #ddd;
+  padding-top: 3pt;
+}
+.sig { font-size: 6.5pt; color: #888; font-style: italic; }
+.inv-logo { height: 44pt; width: auto; opacity: 0.9; }
