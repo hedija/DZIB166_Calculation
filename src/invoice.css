@@ -1,0 +1,23 @@
+@page { size: A4 portrait; margin: 10mm; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Times New Roman', Times, serif; font-size: 8.5pt; line-height: 1.15; color: #000; }
+.inv { page-break-after: always; }
+.inv:last-child { page-break-after: avoid; }
+.hdr-row { display: flex; justify-content: space-between; margin-bottom: 4pt; font-size: 8.5pt; }
+.parties { width: 100%; border-collapse: collapse; margin-bottom: 5pt; }
+.parties td { width: 50%; vertical-align: top; padding: 0.3pt 0; font-size: 8pt; }
+.ph { font-weight: bold; }
+.pl { margin: 1pt 0; font-size: 8pt; }
+.lines { width: 100%; border-collapse: collapse; margin: 4pt 0; font-size: 8pt; }
+.lines th { background: #eee; border: 0.5pt solid #999; padding: 1pt 3pt; text-align: left; }
+.lines td { border: 0.5pt solid #ccc; padding: 1pt 3pt; }
+.lines .grp td { background: #f5f5f5; font-weight: bold; }
+.c { text-align: center; }
+.r { text-align: right; }
+.total-row { display: flex; justify-content: space-between; border-top: 1.5pt solid #000;
+  padding: 2pt 0; margin-top: 1pt; font-weight: bold; font-size: 9.5pt; }
+.words { margin-top: 2pt; font-style: italic; font-size: 8pt; }
+.fn { font-size: 7pt; color: #444; margin-top: 1.5pt; }
+.inv-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 4pt; }
+.sig { font-size: 7.5pt; color: #555; }
+.inv-logo { height: 60pt; width: auto; opacity: 0.85; }
