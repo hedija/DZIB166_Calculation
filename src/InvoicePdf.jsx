@@ -1,11 +1,15 @@
 import React from 'react';
 import { Document, Page, Text, View, StyleSheet, Image, Font } from '@react-pdf/renderer';
 
-Font.register({ family: 'Roboto', fonts: [
-  { src: '/Roboto-Regular.ttf', fontWeight: 'normal', fontStyle: 'normal' },
-  { src: '/Roboto-Bold.ttf',    fontWeight: 'bold',   fontStyle: 'normal' },
-  { src: '/Roboto-Italic.ttf',  fontWeight: 'normal', fontStyle: 'italic' },
-]});
+const fmtV = (v, minDp, maxDp) => {
+  if (typeof v !== 'number') return String(v);
+  const s = v.toFixed(maxDp);
+  const [intPart, fracPart = ''] = s.split('.');
+  const kept = fracPart.slice(0, minDp);
+  const rest = fracPart.slice(minDp).replace(/0+$/, '');
+  const dec = kept + rest;
+  return dec.length > 0 ? intPart + '.' + dec : intPart;
+};
 
 const C  = '#cccccc';
 const CB = '#bbbbbb';
@@ -105,8 +109,8 @@ function InvoicePage({ block, logo }) {
       </View>
 
       {/* ── Period lines ── */}
-      <Text style={s.periodLine}>Komunālo pakalpojumu sniegšanas periods: {period1Txt}</Text>
-      <Text style={s.periodLine}>Apsaimniekošana, remontdarbu fonds: {periodTxt}</Text>
+      {!!period1Txt && <Text style={s.periodLine}>Komunālo pakalpojumu sniegšanas periods: {period1Txt}</Text>}
+      {!!periodTxt  && <Text style={s.periodLine}>Apsaimniekošana, remontdarbu fonds: {periodTxt}</Text>}
       <Text style={s.periodLine}>Rēķina apmaksas termiņš: {paymentDue}</Text>
 
       {/* ── Lines table ── */}
@@ -125,8 +129,8 @@ function InvoicePage({ block, logo }) {
           <View key={i} style={[s.row, i % 2 !== 0 && { backgroundColor: '#f9f9f9' }]}>
             <Text style={[s.td, s.colNos]}>{l.nos}</Text>
             <Text style={[s.td, s.colMv]}>{l.mv}</Text>
-            <Text style={[s.td, s.colD]}>{typeof l.daudz === 'number' ? l.daudz.toFixed(3) : String(l.daudz)}</Text>
-            <Text style={[s.td, s.colC]}>{typeof l.cena  === 'number' ? l.cena.toFixed(4)  : String(l.cena)}</Text>
+            <Text style={[s.td, s.colD]}>{fmtV(l.daudz, 0, 3)}</Text>
+            <Text style={[s.td, s.colC]}>{fmtV(l.cena,  2, 4)}</Text>
             <Text style={[s.td, s.colS]}>{typeof l.summa === 'number' ? l.summa.toFixed(2) : String(l.summa)}</Text>
           </View>
         ))}
