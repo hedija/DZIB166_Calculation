@@ -3,6 +3,45 @@ import { supabase } from "./supabase";
 import INVOICE_CSS from "./src/invoice.css?raw";
 import "./src/dzib_calculations.css";
 import { numVardiem, renderFnText, mergeData } from "./src/calc.js";
+import _fontRegularUrl from "./src/assets/fonts/Roboto-Regular.ttf?url";
+import _fontBoldUrl    from "./src/assets/fonts/Roboto-Bold.ttf?url";
+import _fontItalicUrl  from "./src/assets/fonts/Roboto-Italic.ttf?url";
+
+const MNES = ["Janvāris","Februāris","Marts","Aprīlis","Maijs","Jūnijs",
+              "Jūlijs","Augusts","Septembris","Oktobris","Novembris","Decembris"];
+
+// Sorts apartment IDs: pure numbers first (numerically), numbers+letter last (e.g. 15a after 22)
+const aptSortKey = x => {
+  const m = String(x).trim().match(/^(\d+)([a-zA-Z]*)$/);
+  if (!m) return [2, 0, String(x)];
+  return [m[2] ? 1 : 0, parseInt(m[1]), m[2].toLowerCase()];
+};
+const sortApts = arr => [...arr].sort((a, b) => {
+  const [ta, na, sa] = aptSortKey(a), [tb, nb, sb] = aptSortKey(b);
+  return ta !== tb ? ta - tb : na !== nb ? na - nb : sa < sb ? -1 : sa > sb ? 1 : 0;
+});
+
+let _fontsRegistered = false;
+async function ensureFonts(pdfLib) {
+  if (_fontsRegistered) return;
+  const toDataUrl = async (url) => {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Font ${url}: ${res.status} ${res.statusText}`);
+    const blob = await res.blob();
+    return new Promise(resolve => { const r = new FileReader(); r.onloadend = () => resolve(r.result); r.readAsDataURL(blob); });
+  };
+  const [reg, bold, ital] = await Promise.all([
+    toDataUrl(_fontRegularUrl),
+    toDataUrl(_fontBoldUrl),
+    toDataUrl(_fontItalicUrl),
+  ]);
+  pdfLib.Font.register({ family: 'Roboto', fonts: [
+    { src: reg,  fontWeight: 'normal', fontStyle: 'normal' },
+    { src: bold, fontWeight: 'bold',   fontStyle: 'normal' },
+    { src: ital, fontWeight: 'normal', fontStyle: 'italic' },
+  ]});
+  _fontsRegistered = true;
+}
 
 // xlsx-js-style is ~800 kB — load it lazily on first use so the initial bundle stays small
 let XLSX = null;
@@ -33,7 +72,7 @@ async function saveCfgDb(config) {
 
 async function savePozDb(poz) {
   try {
-    const rows = poz.map((p, i) => ({ id: p.id, label: p.label, is_on: p.on, sort_order: i + 1 }));
+    const rows = poz.map((p, i) => ({ id: p.id, label: p.label, mv: p.mv || '', is_on: p.on, sort_order: i + 1 }));
     await supabase.from('invoice_positions').upsert(rows, { onConflict: 'id' });
   } catch(e) { console.error('savePozDb:', e); }
 }
@@ -42,6 +81,17 @@ async function saveCompanyDb(company) {
   try {
     await supabase.from('settings').upsert({ key: 'company', value: company });
   } catch(e) { console.error('saveCompanyDb:', e); }
+}
+
+async function resolveLogo(company) {
+  if (company.logoData) return company.logoData;
+  if (!company.logoPath) return null;
+  try {
+    const resp = await fetch('/' + company.logoPath);
+    if (!resp.ok) return null;
+    const blob = await resp.blob();
+    return await new Promise(res => { const r = new FileReader(); r.onloadend = () => res(r.result); r.readAsDataURL(blob); });
+  } catch { return null; }
 }
 
 async function saveFnDb(footnotes) {
@@ -63,23 +113,90 @@ async function saveMenDb(men) {
 }
 
 function mergePoz(saved) {
-  const valid = saved.filter(p => DEFAULT_POZICIJAS.some(d => d.id === p.id));
+  const valid = saved.filter(p => DEFAULT_POZICIJAS.some(d => d.id === p.id)).map(p => {
+    const def = DEFAULT_POZICIJAS.find(d => d.id === p.id);
+    return { ...p, mv: p.mv !== undefined ? p.mv : (def?.mv || '') };
+  });
   const ids = new Set(valid.map(p => p.id));
   for (const d of DEFAULT_POZICIJAS) if (!ids.has(d.id)) valid.push({...d, on: true});
   return valid;
 }
 
 const DEFAULT_POZICIJAS = [
-  { id: "cirk",    label: "Cirkulācija" },
-  { id: "lietus",  label: "Lietus notekūdeņi" },
-  { id: "atk",     label: "Atkritumu izvešana" },
-  { id: "koplEl",  label: "Koplietošanas elektrība" },
-  { id: "apsam",   label: "Apsaimniekošana" },
-  { id: "rem",     label: "Remontdarbu fonds" },
-  { id: "siltmez", label: "Siltummezgla apkalpošana" },
-  { id: "apkM2",   label: "Apkure (kopējā)" },
-  { id: "apkAlok", label: "Apkure (patēriņš)" },
+  { id: "audensU", label: "Aukstais ūdens",              mv: "m³" },
+  { id: "kudensU", label: "Karstais ūdens",              mv: "m³" },
+  { id: "cirk",    label: "Cirkulācija",              mv: "m³" },
+  { id: "lietus",  label: "Lietus notekūdeņi",        mv: "m²" },
+  { id: "atk",     label: "Atkritumu izvešana",       mv: "iedz." },
+  { id: "koplEl",  label: "Koplietošanas elektrība",  mv: "vienība" },
+  { id: "apsam",   label: "Apsaimniekošana",          mv: "m²" },
+  { id: "rem",     label: "Remontdarbu fonds",        mv: "m²" },
+  { id: "siltmez", label: "Siltummezgla apkalpošana", mv: "m²" },
+  { id: "apkM2",   label: "Apkure (kopējā)",          mv: "m²" },
+  { id: "apkAlok", label: "Apkure (patēriņš)",        mv: "vienība" },
 ];
+
+const defaultFullAptCfg = {
+  enabled: false,
+  recipientName: '', email: '',
+  includePositions: [],
+  elec: false, elecPrev: '', elecCur: '', elecAmount: '',
+  nin: false, ninLabel: 'NĪN nodoklis', ninAmount: '',
+  freeLines: [],
+};
+
+function _buildFullBlock(apt, regularBlock, aptCfg, pozicijas, company) {
+  const cfg = { ...defaultFullAptCfg, ...aptCfg };
+  const now = new Date();
+  const DAYS_LV   = ["svētdiena","pirmdiena","otrdiena","trešdiena","ceturtdiena","piektdiena","sestdiena"];
+  const MONTHS_LV = ["janvārī","februārī","martā","aprīlī","maijā","jūnijā","jūlijā","augustā","septembrī","oktobrī","novembrī","decembrī"];
+  const dateTxt = `${DAYS_LV[now.getDay()]}, ${now.getFullYear()}. gada ${now.getDate()}. ${MONTHS_LV[now.getMonth()]}`;
+
+  const lines = [];
+  const inclSet = new Set(cfg.includePositions || []);
+  for (const poz of pozicijas) {
+    if (!inclSet.has(poz.id)) continue;
+    if (poz.id === "audensU") {
+      lines.push(...(regularBlock?.lines || []).filter(l => l.nos.startsWith('Aukstā ūdens')));
+    } else if (poz.id === "kudensU") {
+      lines.push(...(regularBlock?.lines || []).filter(l => l.nos.startsWith('Karstā ūdens')));
+    } else {
+      const rl = (regularBlock?.lines || []).find(l => l.nos.startsWith(poz.label));
+      if (rl) lines.push({ ...rl });
+    }
+  }
+  if (cfg.elec) {
+    const prev = parseFloat(cfg.elecPrev) || 0;
+    const cur  = parseFloat(cfg.elecCur)  || 0;
+    const kwh  = Math.max(0, Math.round((cur - prev) * 1000) / 1000);
+    const amt  = parseFloat(cfg.elecAmount) || 0;
+    lines.push({ nos: `Elektrības skaitītājs (${prev.toFixed(3)}–${cur.toFixed(3)})`, mv: 'kWh', daudz: kwh, cena: amt, summa: amt });
+  }
+  if (cfg.nin && cfg.ninAmount) {
+    const amt = Math.round((parseFloat(cfg.ninAmount) || 0) * 100) / 100;
+    lines.push({ nos: cfg.ninLabel || 'NĪN nodoklis', mv: '', daudz: 1, cena: amt, summa: amt });
+  }
+  for (const l of (cfg.freeLines || [])) {
+    if (!l.nos?.trim()) continue;
+    const d = parseFloat(l.daudz)||0, c = Math.round((parseFloat(l.cena)||0) * 100) / 100;
+    lines.push({ nos: l.nos.trim(), mv: l.mv||'', daudz: d, cena: c, summa: c });
+  }
+  const totalEur = Math.round(lines.reduce((s,l) => s + l.summa, 0) * 100) / 100;
+  return {
+    dateTxt,
+    invoiceNr: '',
+    supplier: { nos: company.name||'', addr: company.address||'', reg: company.regNr||'', bank: company.bank||'', swift: company.swift||'', konts: company.account||'' },
+    owner: cfg.recipientName || '',
+    recipientAddress: `${company.address || ''}, dz. ${apt}`,
+    period1Txt: regularBlock?.period1Txt || '',
+    periodTxt: regularBlock?.periodTxt || '',
+    paymentDue: regularBlock?.paymentDue || '',
+    lines,
+    totalEur,
+    wordsText: numVardiem(totalEur),
+    renderedFootnotes: [],
+  };
+}
 
 // ─── Parse Fails 1: skaitītāju atskaite ───────────────────────────────────
 function parseAtskaite(wb, buildingId = "") {
@@ -148,8 +265,7 @@ function parseAtskaite(wb, buildingId = "") {
   const alloc = allocData.filter(r => r[I_DZ] != null && r[I_CUST] != null && String(r[I_CUST]).trim() !== "");
 
   const allDz = new Set([...cold,...hot,...alloc].map(r => r[I_DZ]).filter(v => v != null));
-  const aptKey = x => { const n = parseInt(String(x)); return isNaN(n)?[1,String(x)]:[0,n]; };
-  const sorted = [...allDz].sort((a,b)=>{ const[ta,va]=aptKey(a),[tb,vb]=aptKey(b); return ta!==tb?ta-tb:String(va)<String(vb)?-1:1; });
+  const sorted = sortApts([...allDz]);
 
   return { period, kuKopaTotal, auKopaTotal, apartments: sorted.map(dz => {
     const own   = rs => rs.find(r => r[I_DZ] === dz);
@@ -194,7 +310,113 @@ function parseAlokatori(wb) {
 // ─── Excel builder ─────────────────────────────────────────────────────────
 function fmt(ws,f,r1,c1,r2,c2){ for(let r=r1;r<=r2;r++)for(let c=c1;c<=c2;c++){const a=XLSX.utils.encode_cell({r,c});if(ws[a]&&ws[a].t==="n")ws[a].z=f;}}
 
-function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, company, footnotes) {
+function buildIrnieku(fullInvs, company) {
+  const wb = XLSX.utils.book_new();
+  const now = new Date();
+  const DAYS   = ["svētdiena","pirmdiena","otrdiena","trešdiena","ceturtdiena","piektdiena","sestdiena"];
+  const MONTHS = ["janvārī","februārī","martā","aprīlī","maijā","jūnijā","jūlijā","augustā","septembrī","oktobrī","novembrī","decembrī"];
+  const dTxt = `${DAYS[now.getDay()]}, ${now.getFullYear()}. gada ${now.getDate()}. ${MONTHS[now.getMonth()]}`;
+  for (const inv of fullInvs) {
+    const ML = (r1,c1,r2,c2) => ({s:{r:r1,c:c1},e:{r:r2,c:c2}});
+    const rows = []; const merges = []; let ri = 0;
+    const push = (row) => { rows.push(row); return ri++; };
+    const merge = (r1,c1,r2,c2) => merges.push(ML(r1,c1,r2,c2));
+    const E = ["","","","",""];
+    const rD = push([dTxt,"","",`Rēķins Nr. ${inv.invoice_nr}`,""]);
+    merge(rD,0,rD,2); merge(rD,3,rD,4);
+    push([...E]);
+    const rP = push([`Piegādātājs: ${company?.name||""}`, "","", `Saņēmējs: ${inv.owner}`, ""]);
+    merge(rP,0,rP,2); merge(rP,3,rP,4);
+    const addrLines = (inv.recipient_address||"").split("\n");
+    const piegLines = [company?.address||"", company?.regNr||"", company?.bank||"", company?.swift||"", company?.account||""].filter(Boolean);
+    const maxL = Math.max(piegLines.length, addrLines.length);
+    for (let i = 0; i < maxL; i++) {
+      const row = [piegLines[i]||"","","",addrLines[i]||"",""];
+      const rr = push(row); merge(rr,0,rr,2); merge(rr,3,rr,4);
+    }
+    push([...E]);
+    const rTerm = push([`Rēķina apmaksas termiņš: ${inv.payment_due}`, "","","",""]);
+    merge(rTerm,0,rTerm,4);
+    push([...E]);
+    push(["Nosaukums","Mērvien.","Daudz.","Cena (EUR)","Summa (EUR)"]);
+    const rDataStart = ri;
+    for (const l of (inv.lines||[])) push([l.nos, l.mv, l.daudz, l.cena, l.summa]);
+    const rDataEnd = ri - 1;
+    push([...E]);
+    const rKopa = push(["Summa samaksai, EUR","","","",parseFloat(inv.total_eur)||0]);
+    merge(rKopa,0,rKopa,3);
+    push([...E]);
+    const rVardi = push([`Summa vārdiem: ${numVardiem(parseFloat(inv.total_eur)||0)}`, "","","",""]);
+    merge(rVardi,0,rVardi,4);
+    push([...E]);
+    const rFtr = push(["Rēķins sagatavots elektroniski un derīgs bez paraksta.","","","",""]);
+    merge(rFtr,0,rFtr,4);
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws["!cols"] = [42,10,10,16,14].map(w=>({wch:w}));
+    ws["!merges"] = merges;
+    for (let i = rDataStart; i <= rDataEnd; i++) {
+      const l = (inv.lines||[])[i-rDataStart];
+      if (!l) continue;
+      if (typeof l.daudz==="number") { const a=XLSX.utils.encode_cell({r:i,c:2}); if(ws[a]) ws[a].z="0.###"; }
+      if (typeof l.cena==="number")  { const a=XLSX.utils.encode_cell({r:i,c:3}); if(ws[a]) ws[a].z="0.00##"; }
+      if (typeof l.summa==="number") { const a=XLSX.utils.encode_cell({r:i,c:4}); if(ws[a]) ws[a].z="0.00"; }
+    }
+    { const a=XLSX.utils.encode_cell({r:rKopa,c:4}); if(ws[a]) ws[a].z="0.00"; }
+    ws["!pageSetup"]={paperSize:9,orientation:"portrait",fitToPage:true,fitToWidth:1,fitToHeight:1};
+    ws["!margins"]={left:0.4,right:0.4,top:0.5,bottom:0.5,header:0.2,footer:0.2};
+    XLSX.utils.book_append_sheet(wb, ws, String(inv.apt||"").replace(/[:\\\/\?\*\[\]]/g,"").substring(0,31));
+  }
+
+  // ── Kopsavilkums sheet ───────────────────────────────────────────────────
+  {
+    // Normalize meter-reading parentheticals: "Skaitītājs (1.234–5.678)" → "Skaitītājs"
+    const normNos = nos => String(nos).replace(/\s*\(\d[^)]*\)/g, '').trim();
+    const posSet = new Map();
+    for (const inv of fullInvs) {
+      for (const l of (inv.lines || [])) {
+        const n = normNos(l.nos);
+        if (!posSet.has(n)) posSet.set(n, posSet.size);
+      }
+    }
+    const posNames = [...posSet.keys()];
+    const hdrS = ["Dz.Nr.", "Īpašnieks", "Rēķins Nr.", ...posNames, "KOPĀ"];
+    const aptRows = fullInvs.map(inv => {
+      const amtMap = {};
+      for (const l of (inv.lines || [])) {
+        const n = normNos(l.nos);
+        const v = typeof l.summa === 'number' ? l.summa : parseFloat(l.summa) || 0;
+        amtMap[n] = Math.round(((amtMap[n] || 0) + v) * 100) / 100;
+      }
+      return [inv.apt || '', inv.owner || '', inv.invoice_nr || '',
+        ...posNames.map(n => amtMap[n] || 0),
+        Math.round((parseFloat(inv.total_eur) || 0) * 100) / 100,
+      ];
+    });
+    const totRow = ["KOPĀ", "", "",
+      ...posNames.map((_, i) => Math.round(aptRows.reduce((s, r) => s + (r[3 + i] || 0), 0) * 100) / 100),
+      Math.round(aptRows.reduce((s, r) => s + (r[r.length - 1] || 0), 0) * 100) / 100,
+    ];
+    const rSs = [
+      [`ĪRNIEKU RĒĶINU KOPSAVILKUMS`, ...Array(hdrS.length - 1).fill("")],
+      hdrS, ...aptRows, totRow,
+    ];
+    const wsS = XLSX.utils.aoa_to_sheet(rSs);
+    const ncS = hdrS.length;
+    wsS["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: ncS - 1 } }];
+    wsS["!cols"] = [{ wch: 10 }, { wch: 20 }, { wch: 18 }, ...Array(ncS - 3).fill({ wch: 16 })];
+    for (let ri = 2; ri <= aptRows.length + 2; ri++) {
+      for (let ci = 3; ci < ncS; ci++) {
+        const addr = XLSX.utils.encode_cell({ r: ri, c: ci });
+        if (wsS[addr]) wsS[addr].z = "0.00";
+      }
+    }
+    XLSX.utils.book_append_sheet(wb, wsS, "Kopsavilkums");
+  }
+
+  return wb;
+}
+
+function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, company, footnotes, extraInvs = []) {
   const {period}=atskaite, merged=mergeData(atskaite,alokData,config), wb=XLSX.utils.book_new();
   const MAU=Math.max(...merged.map(a=>a.coldMeters.length),1), MKU=Math.max(...merged.map(a=>a.hotMeters.length),1);
 
@@ -247,8 +469,8 @@ function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, comp
   XLSX.utils.book_append_sheet(wb,ws3,"Skaitītāju reģistrs");
 
   // Sheet 4
-  const r4s=[["DZĪVOKĻU KONFIGURĀCIJA"],["Dz.Nr.","Īpašnieks","Platība m²","Personas","AŪ skait.","KŪ skait.","E-pasts"]];
-  for(const a of merged) r4s.push([a.dz,a.owner,a.area,a.residents,a.coldMeters.length,a.hotMeters.length,a.email]);
+  const r4s=[["DZĪVOKĻU KONFIGURĀCIJA"],["Dz.Nr.","Īpašnieks","Platība m²","Personas","AŪ skait.","KŪ skait."]];
+  for(const a of merged) r4s.push([a.dz,a.owner,a.area,a.residents,a.coldMeters.length,a.hotMeters.length]);
   const de=2+merged.length; r4s.push([],["KOPĀ","",`=SUM(C3:C${de})`,`=SUM(D3:D${de})`,"","",""]);
   const ws4=XLSX.utils.aoa_to_sheet(r4s);
   ws4["!cols"]=[10,18,12,10,12,12,28].map(w=>({wch:w}));
@@ -268,8 +490,7 @@ function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, comp
     const lietusMen = Math.round(tLietus / 12 * 100) / 100;
 
     const _now = new Date();
-    const _MNES = ["Janvāris","Februāris","Marts","Aprīlis","Maijs","Jūnijs",
-                   "Jūlijs","Augusts","Septembris","Oktobris","Novembris","Decembris"];
+    const _MNES = MNES;
     const gadam     = String(men.year     || _now.getFullYear());
     const mesCipars = String(men.monthNum || (_now.getMonth() + 1)).padStart(2, "0");
     const mesVards  = men.monthName       || _MNES[_now.getMonth()];
@@ -279,9 +500,10 @@ function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, comp
     const _nextYear = _curMes === 12 ? _curYear + 1 : _curYear;
     const nextMesCipars = String(_nextMes).padStart(2, "0");
     const nextGadam     = String(_nextYear);
-    const nextMesVards  = _MNES[_nextMes - 1];
-    const periodTxt  = `${nextGadam}. gada ${nextMesVards}`;
-    const period1Txt = period || `${gadam}. gada ${mesVards}`;
+    const _prevMes   = _curMes === 1 ? 12 : _curMes - 1;
+    const _prevYear  = _curMes === 1 ? _curYear - 1 : _curYear;
+    const periodTxt  = `${gadam}. gada ${mesVards}`;
+    const period1Txt = `${String(_prevYear)}. gada ${_MNES[_prevMes - 1]}`;
 
     const atkritumiKopa = parseFloat(men.waste) || 0;
     const totalPersonas = merged.reduce((s, a) => s + (a.residents || 0), 0);
@@ -404,12 +626,145 @@ function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, comp
       XLSX.utils.book_append_sheet(wb, ws5, "Kopsavilkums");
     }
 
+    // ── Sheet 6: Rēķinu kopsavilkums (dzīvoklis × pozīcija) ──────────────────
+    {
+      const effPoz6 = (pozicijas && pozicijas.length) ? pozicijas : DEFAULT_POZICIJAS.map(p=>({...p,on:true}));
+      const activePoz6 = effPoz6.filter(p => p.on);
+      const kAtriPerPers6 = totalPersonas > 0 ? Math.round(atkritumiKopa / totalPersonas * 10000) / 10000 : 0;
+
+      const aptAmts = merged.map(apt => {
+        const cfg = config[apt.dz] || {};
+        const dzOff = new Set(cfg.posDisabled || []);
+        const cirkulGrupas = parseFloat(cfg.circGroup) || 0;
+        const amtMap = {};
+        for (const poz of activePoz6) {
+          if (dzOff.has(poz.id)) { amtMap[poz.id] = 0; continue; }
+          switch (poz.id) {
+            case 'audensU':  amtMap[poz.id] = Math.round(apt.auKopa * tAU * 100) / 100; break;
+            case 'kudensU':  amtMap[poz.id] = Math.round(apt.kuKopa * tKU * 100) / 100; break;
+            case 'cirk':     amtMap[poz.id] = cirkulGrupas > 0 ? Math.round(cirkulGrupas * (cirkulTarif||0) * 100) / 100 : 0; break;
+            case 'lietus':   amtMap[poz.id] = lietusMen; break;
+            case 'atk':      amtMap[poz.id] = Math.round(kAtriPerPers6 * (apt.residents||0) * 100) / 100; break;
+            case 'koplEl':   amtMap[poz.id] = Math.round(tKoplEl * 100) / 100; break;
+            case 'apsam':    amtMap[poz.id] = Math.round(apt.area * tApsam * 100) / 100; break;
+            case 'rem':      amtMap[poz.id] = Math.round(apt.area * tRem * 100) / 100; break;
+            case 'siltmez':  amtMap[poz.id] = Math.round(apt.area * tSiltmez * 100) / 100; break;
+            case 'apkM2':    amtMap[poz.id] = men.heatingIncluded ? Math.round(apt.maksPlatibaiArPVN * 100) / 100 : 0; break;
+            case 'apkAlok':  amtMap[poz.id] = men.heatingIncluded ? Math.round(apt.maksVienibamArPVN * 100) / 100 : 0; break;
+            default:         amtMap[poz.id] = 0;
+          }
+        }
+        const extras = Math.round((cfg.posExtra || []).reduce((s, ex) => s + (parseFloat(ex.summa) || 0), 0) * 100) / 100;
+        const total  = Math.round((Object.values(amtMap).reduce((s, v) => s + v, 0) + extras) * 100) / 100;
+        return { apt, amtMap, extras, total };
+      });
+
+      const hdr6 = ["Dz.Nr.", "Īpašnieks", ...activePoz6.map(p => p.label), "Papildus", "KOPĀ"];
+      const nc6  = hdr6.length;
+      const totRow6 = ["KOPĀ", "",
+        ...activePoz6.map(poz => Math.round(aptAmts.reduce((s, { amtMap }) => s + (amtMap[poz.id] || 0), 0) * 100) / 100),
+        Math.round(aptAmts.reduce((s, { extras }) => s + extras, 0) * 100) / 100,
+        Math.round(aptAmts.reduce((s, { total  }) => s + total,  0) * 100) / 100,
+      ];
+
+      // Extra invoices section
+      const extraSection = [];
+      const mergesExtra = [];
+      if (extraInvs && extraInvs.length > 0) {
+        extraSection.push(Array(nc6).fill(""));
+        const hdgRow = Array(nc6).fill(""); hdgRow[0] = "PAPILDU RĒĶINI";
+        extraSection.push(hdgRow);
+        const subHdr = Array(nc6).fill(""); subHdr[0] = "Rēķins Nr."; subHdr[1] = "Saņēmējs"; subHdr[nc6 - 1] = "KOPĀ (EUR)";
+        extraSection.push(subHdr);
+        for (const inv of extraInvs) {
+          const row = Array(nc6).fill("");
+          row[0] = inv.invoice_nr || '';
+          row[1] = inv.owner || '';
+          row[nc6 - 1] = Math.round((parseFloat(inv.total_eur) || 0) * 100) / 100;
+          extraSection.push(row);
+        }
+        const eTot = Array(nc6).fill(""); eTot[0] = "KOPĀ";
+        eTot[nc6 - 1] = Math.round(extraInvs.reduce((s, inv) => s + (parseFloat(inv.total_eur) || 0), 0) * 100) / 100;
+        extraSection.push(eTot);
+      }
+
+      const r6s = [
+        [`RĒĶINU KOPSAVILKUMS | ${period || `${gadam}. gada ${mesVards}`}`, ...Array(nc6 - 1).fill("")],
+        hdr6,
+        ...aptAmts.map(({ apt, amtMap, extras, total }) => [
+          apt.dz, apt.owner || '', ...activePoz6.map(p => amtMap[p.id] ?? 0), extras, total,
+        ]),
+        totRow6,
+        ...extraSection,
+      ];
+
+      // Merge row indices
+      const aptDataRows = aptAmts.length;
+      const hdgIdx = 2 + aptDataRows + 1 + 1 + 1; // after title, hdr, apt rows, totRow, blank
+      const merges6 = [{ s: { r: 0, c: 0 }, e: { r: 0, c: nc6 - 1 } }];
+      if (extraInvs && extraInvs.length > 0) {
+        merges6.push({ s: { r: hdgIdx, c: 0 }, e: { r: hdgIdx, c: nc6 - 1 } });
+      }
+
+      const ws6 = XLSX.utils.aoa_to_sheet(r6s);
+      ws6["!merges"] = merges6;
+      ws6["!cols"] = [{ wch: 10 }, { wch: 18 }, ...Array(nc6 - 2).fill({ wch: 14 })];
+      fmt(ws6, "0.00", 2, 2, r6s.length - 1, nc6 - 1);
+      XLSX.utils.book_append_sheet(wb, ws6, "Rēķinu kopsavilkums");
+    }
+
+    // ── Papildu rēķinu sheets (pirms dzīvokļu lapām) ─────────────────────────
+    for (const inv of extraInvs) {
+      const ML3 = (r1,c1,r2,c2) => ({s:{r:r1,c:c1},e:{r:r2,c:c2}});
+      const rows3 = []; const merges3 = []; let ri3 = 0;
+      const push3 = (row) => { rows3.push(row); return ri3++; };
+      const merge3 = (r1,c1,r2,c2) => merges3.push(ML3(r1,c1,r2,c2));
+      const E3 = ["","","","",""];
+      const rD3 = push3([dateTxt,"","",`Rēķins Nr. ${inv.invoice_nr}`,""]);
+      merge3(rD3,0,rD3,2); merge3(rD3,3,rD3,4);
+      push3([...E3]);
+      const rP3 = push3([`Piegādātājs: ${PIEG_NOS}`,"","",`Saņēmējs: ${inv.owner||""}`,""]);
+      merge3(rP3,0,rP3,2); merge3(rP3,3,rP3,4);
+      const addrL3 = (inv.recipient_address||"").split("\n");
+      const piegL3 = [PIEG_ADDR,PIEG_REG,PIEG_BANK,PIEG_SWIFT,PIEG_KONTS].filter(Boolean);
+      for (let i = 0; i < Math.max(piegL3.length,addrL3.length); i++) {
+        const rr = push3([piegL3[i]||"","","",addrL3[i]||"",""]); merge3(rr,0,rr,2); merge3(rr,3,rr,4);
+      }
+      push3([...E3]);
+      const rTerm3 = push3([`Rēķina apmaksas termiņš: ${inv.payment_due}`,"","","",""]); merge3(rTerm3,0,rTerm3,4);
+      push3([...E3]);
+      push3(["Nosaukums","Mērvien.","Daudz.","Cena (EUR)","Summa (EUR)"]);
+      const rDS3 = ri3;
+      for (const l of (inv.lines||[])) push3([l.nos,l.mv,l.daudz,l.cena,l.summa]);
+      const rDE3 = ri3 - 1;
+      push3([...E3]);
+      const rKopa3 = push3(["Summa samaksai, EUR","","","",parseFloat(inv.total_eur)||0]); merge3(rKopa3,0,rKopa3,3);
+      push3([...E3]);
+      const rVardi3 = push3([`Summa vārdiem: ${numVardiem(parseFloat(inv.total_eur)||0)}`,"","","",""]); merge3(rVardi3,0,rVardi3,4);
+      push3([...E3]);
+      const rFtr3 = push3(["Rēķins sagatavots elektroniski un derīgs bez paraksta.","","","",""]); merge3(rFtr3,0,rFtr3,4);
+      const ws3p = XLSX.utils.aoa_to_sheet(rows3);
+      ws3p["!cols"] = [42,10,10,16,14].map(w=>({wch:w}));
+      ws3p["!merges"] = merges3;
+      for (let i = rDS3; i <= rDE3; i++) {
+        const l = (inv.lines||[])[i-rDS3]; if (!l) continue;
+        if (typeof l.daudz==="number") { const a=XLSX.utils.encode_cell({r:i,c:2}); if(ws3p[a]) ws3p[a].z="0.###"; }
+        if (typeof l.cena==="number")  { const a=XLSX.utils.encode_cell({r:i,c:3}); if(ws3p[a]) ws3p[a].z="0.00##"; }
+        if (typeof l.summa==="number") { const a=XLSX.utils.encode_cell({r:i,c:4}); if(ws3p[a]) ws3p[a].z="0.00"; }
+      }
+      { const a=XLSX.utils.encode_cell({r:rKopa3,c:4}); if(ws3p[a]) ws3p[a].z="0.00"; }
+      ws3p["!pageSetup"]={paperSize:9,orientation:"portrait",fitToPage:true,fitToWidth:1,fitToHeight:1};
+      ws3p["!margins"]={left:0.4,right:0.4,top:0.5,bottom:0.5,header:0.2,footer:0.2};
+      const sNameP = `Papildu-${(inv.apts||[]).join("-")||inv.invoice_nr||""}`.replace(/[:\\\/\?\*\[\]]/g,"").substring(0,31);
+      XLSX.utils.book_append_sheet(wb, ws3p, sNameP);
+    }
+
     for (const apt of merged) {
       const cfg = config[apt.dz] || {};
       const cirkulGrupas = parseFloat(cfg.circGroup) || 0;
       const name = apt.owner || "";
       const payDay = String(cfg.payDay || 20).padStart(2, "0");
-      const termiņš = `${payDay}.${nextMesCipars}.${nextGadam}`;
+      const termiņš = `${payDay}.${mesCipars}.${gadam}`;
 
       const rApsam   = Math.round(apt.area  * tApsam   * 100) / 100;
       const rRem     = Math.round(apt.area  * tRem     * 100) / 100;
@@ -559,8 +914,8 @@ function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, comp
 
       for (let i = rDataStart; i <= rDataEnd; i++) {
         const l = lines[i - rDataStart];
-        if (typeof l[2] === "number") { const a = XLSX.utils.encode_cell({r:i, c:2}); if (ws[a]) ws[a].z = "0.000"; }
-        if (typeof l[3] === "number") { const a = XLSX.utils.encode_cell({r:i, c:3}); if (ws[a]) ws[a].z = "0.0000"; }
+        if (typeof l[2] === "number") { const a = XLSX.utils.encode_cell({r:i, c:2}); if (ws[a]) ws[a].z = "0.###"; }
+        if (typeof l[3] === "number") { const a = XLSX.utils.encode_cell({r:i, c:3}); if (ws[a]) ws[a].z = "0.00##"; }
         if (typeof l[4] === "number") { const a = XLSX.utils.encode_cell({r:i, c:4}); if (ws[a]) ws[a].z = "0.00"; }
       }
       { const a = XLSX.utils.encode_cell({r: rKopa, c: 4}); if (ws[a]) ws[a].z = "0.00"; }
@@ -622,9 +977,10 @@ function _buildInvoiceBlocks(atskaite, alokData, config, men, cirkulTarif, pozic
   const _nextYear = _curMes === 12 ? _curYear + 1 : _curYear;
   const nextMesCipars = String(_nextMes).padStart(2, "0");
   const nextGadam     = String(_nextYear);
-  const nextMesVards  = _MNES[_nextMes - 1];
-  const periodTxt  = `${nextGadam}. gada ${nextMesVards}`;
-  const period1Txt = period || `${gadam}. gada ${mesVards}`;
+  const _prevMes   = _curMes === 1 ? 12 : _curMes - 1;
+  const _prevYear  = _curMes === 1 ? _curYear - 1 : _curYear;
+  const periodTxt  = `${gadam}. gada ${mesVards}`;
+  const period1Txt = `${String(_prevYear)}. gada ${_MNES[_prevMes - 1]}`;
 
   const atkritumiKopa  = parseFloat(men.waste) || 0;
   const totalPersonas  = merged.reduce((s, a) => s + (a.residents || 0), 0);
@@ -654,7 +1010,7 @@ function _buildInvoiceBlocks(atskaite, alokData, config, men, cirkulTarif, pozic
     const cirkulGrupas = parseFloat(cfg.circGroup) || 0;
     const name         = apt.owner || "";
     const payDay = String(cfg.payDay || 20).padStart(2, "0");
-    const termiņš = `${payDay}.${nextMesCipars}.${nextGadam}`;
+    const termiņš = `${payDay}.${mesCipars}.${gadam}`;
 
     const rApsam   = Math.round(apt.area  * tApsam   * 100) / 100;
     const rRem     = Math.round(apt.area  * tRem     * 100) / 100;
@@ -685,6 +1041,8 @@ function _buildInvoiceBlocks(atskaite, alokData, config, men, cirkulTarif, pozic
     for (const poz of effPoz) {
       if (!poz.on || dzOff.has(poz.id)) continue;
       switch (poz.id) {
+        case "audensU": posLines.push(...auLines); break;
+        case "kudensU": posLines.push(...kuLines); break;
         case "cirk":    if (cirkulGrupas>0) posLines.push({nos:"Cirkulācija*",mv:"gr.",daudz:cirkulGrupas,cena:cirkulTarif||0,summa:rCirk}); break;
         case "lietus":  posLines.push({nos:"Lietus notekūdeņi",mv:"€/dz.",daudz:1,cena:lietusMen,summa:lietusMen}); break;
         case "atk":     if (rAtk>0) posLines.push({nos:"Atkritumu izvešana**",mv:"pers.",daudz:apt.residents||0,cena:atkritumiPerPers,summa:rAtk}); break;
@@ -701,7 +1059,7 @@ function _buildInvoiceBlocks(atskaite, alokData, config, men, cirkulTarif, pozic
       if (ex.label && s !== 0) posLines.push({nos:ex.label,mv:"€/dz.",daudz:1,cena:s,summa:s});
     }
 
-    const lines    = [...auLines, ...kuLines, ...posLines];
+    const lines    = [...posLines];
     const kopsumma = lines.reduce((s, l) => s + l.summa, 0);
     const nowMM = String(now.getMonth() + 1).padStart(2, "0");
     const invoiceNr = `B${gadam}${nowMM}${String(rekNrSakumsHtml + htmlRekIdx).padStart(4, "0")}`;
@@ -961,6 +1319,7 @@ export default function App({ onBack }) {
     tarifRain:        "9.6074",
     tarifCommonElec:  "6.80",
     // Period
+    period:           "",
     monthNum:         "",
     monthName:        "",
     year:             "",
@@ -971,7 +1330,7 @@ export default function App({ onBack }) {
     heatingAllocPct:  "60",
   });
 
-  const [company,     setCompany]     = useState({name:'',address:'',regNr:'',bank:'',swift:'',account:'',buildingId:'',logoPath:'',title:''});
+  const [company,     setCompany]     = useState({name:'',address:'',regNr:'',bank:'',swift:'',account:'',buildingId:'',logoPath:'',logoData:'',title:''});
   const [footnotes,   setFootnotes]   = useState([]);
   const [config,      setConfig]      = useState({});
   const [done,        setDone]        = useState(false);
@@ -980,8 +1339,15 @@ export default function App({ onBack }) {
     subject: 'Rēķins Nr. {{invoiceNr}} par {{period}}, {{dz}}',
     body: '<p>Labdien, <strong>{{owner}}</strong>!</p>\n<p>Pievienots rēķins <strong>Nr. {{invoiceNr}}</strong> par <strong>{{period}}</strong>.</p>\n<p>Kopējā summa: <strong>{{kopsumma}} EUR</strong>.<br>Apmaksas termiņš: <strong>{{paymentDue}}</strong>.</p>\n<p>Ar cieņu <br>DZĪB Brīvības 166 Pārvaldnieks</p>',
   });
+  const [ownerEmails,   setOwnerEmails]   = useState({});
   const [emailSending,  setEmailSending]  = useState(false);
   const [emailProgress, setEmailProgress] = useState({ sent: 0, total: 0, errors: [], noEmail: [] });
+  const [extraInvoices, setExtraInvoices] = useState([]);
+  const [extraForm,     setExtraForm]     = useState(null);
+  const [fullInvConfig, setFullInvConfig] = useState({});
+  const [fullInvEditApt,setFullInvEditApt]= useState(null);
+  // extraForm = null → list view; object → new/edit form
+  // { periodMode:'settings'|'custom', customPeriod:'', owner:'', apts:[], lines:[{nos,mv,daudz,cena}] }
   const [pozicijas,   setPozicijas]   = useState(() => DEFAULT_POZICIJAS.map(p => ({...p, on: true})));
   const [activePanel,    setActivePanel]    = useState(null); // 'cfg'|'poz'|'fn'|'comp'|null
   const [expandedDz,     setExpandedDz]     = useState(null);
@@ -1014,12 +1380,17 @@ export default function App({ onBack }) {
     // Mēneša iestatījumi
     supabase.from('settings').select('value').eq('key', 'monthly_settings').maybeSingle()
       .then(({ data }) => {
-        if (data?.value) setMen(prev => ({ ...prev, ...data.value }));
+        if (data?.value) {
+          const v = data.value;
+          const period = v.period || (v.year && v.monthNum
+            ? `${v.year}-${String(v.monthNum).padStart(2,'0')}` : '');
+          setMen(prev => ({ ...prev, ...v, period }));
+        }
       });
     // Rēķinu pozīcijas
     supabase.from('invoice_positions').select('*').order('sort_order').then(({ data }) => {
       if (data && data.length)
-        setPozicijas(mergePoz(data.map(r => ({ id: r.id, label: r.label, on: r.is_on }))));
+        setPozicijas(mergePoz(data.map(r => ({ id: r.id, label: r.label, mv: r.mv || '', on: r.is_on }))));
     });
     // Uzņēmuma rekvizīti
     supabase.from('settings').select('value').eq('key', 'company').maybeSingle()
@@ -1030,6 +1401,27 @@ export default function App({ onBack }) {
     // Epasta iestatījumi
     supabase.from('settings').select('value').eq('key', 'email_settings').maybeSingle()
       .then(({ data }) => { if (data?.value) setEmailSettings(prev => ({ ...prev, ...data.value })); });
+    // Iedzīvotāju e-pasta adreses
+    supabase.from('settings').select('value').eq('key', 'owner_emails').maybeSingle()
+      .then(({ data }) => { if (data?.value) setOwnerEmails(data.value); });
+    // Pilno rēķinu konfigurācija
+    supabase.from('settings').select('value').eq('key', 'full_invoice_config').maybeSingle()
+      .then(({ data }) => {
+        if (data?.value) {
+          const safe = {};
+          for (const [k, v] of Object.entries(data.value)) {
+            safe[k] = {
+              ...defaultFullAptCfg, ...v,
+              freeLines: Array.isArray(v?.freeLines) ? v.freeLines : [],
+              includePositions: Array.isArray(v?.includePositions) ? v.includePositions : [],
+            };
+          }
+          setFullInvConfig(safe);
+        }
+      });
+    // Papildu rēķini
+    supabase.from('extra_invoices').select('*').order('created_at', { ascending: false })
+      .then(({ data }) => { if (data) setExtraInvoices(data); });
   }, []);
 
   const saveMen = (newMen) => { saveMenDb(newMen); };
@@ -1215,6 +1607,157 @@ export default function App({ onBack }) {
     if (upd) setEmailSettings(next);
     supabase.from('settings').upsert({ key: 'email_settings', value: next }).catch(e => console.error('saveEmailSettings:', e));
   };
+  const saveOwnerEmails = (emails) => {
+    supabase.from('settings').upsert({ key: 'owner_emails', value: emails })
+      .then(({ error }) => { if (error) console.error('saveOwnerEmails:', error); })
+      .catch(e => console.error('saveOwnerEmails:', e));
+  };
+  const saveFullInvConfig = (cfg) => {
+    supabase.from('settings').upsert({ key: 'full_invoice_config', value: cfg })
+      .then(({ error }) => { if (error) console.error('saveFullInvConfig:', error); })
+      .catch(e => console.error('saveFullInvConfig:', e));
+  };
+  const updateFullApt = (apt, patch) => {
+    setFullInvConfig(prev => {
+      const merged = { ...defaultFullAptCfg, ...prev[apt], ...patch };
+      if (!Array.isArray(merged.freeLines)) merged.freeLines = [];
+      if (!Array.isArray(merged.includePositions)) merged.includePositions = [];
+      const next = { ...prev, [apt]: merged };
+      saveFullInvConfig(next);
+      return next;
+    });
+  };
+
+  // ─── Papildu rēķini ────────────────────────────────────────────────────────
+  const loadExtraInvoices = async () => {
+    const { data } = await supabase.from('extra_invoices').select('*').order('created_at', { ascending: false });
+    if (data) setExtraInvoices(data);
+  };
+
+  const _extraPeriodInfo = (form) => {
+    const _now = new Date();
+    let gadam, mesCipars, mesVards;
+    if (form.periodMode === 'custom' && form.customPeriod) {
+      const [y, m] = form.customPeriod.split('-');
+      gadam = y; mesCipars = m.padStart(2,'0'); mesVards = MNES[parseInt(m,10)-1] || '';
+    } else {
+      gadam     = String(men.year     || _now.getFullYear());
+      mesCipars = String(men.monthNum || (_now.getMonth()+1)).padStart(2,'0');
+      mesVards  = men.monthName || MNES[_now.getMonth()];
+    }
+    const curMes  = parseInt(mesCipars) || 1;
+    const curYear = parseInt(gadam);
+    const nextMes = curMes === 12 ? 1 : curMes + 1;
+    const nextYear = curMes === 12 ? curYear + 1 : curYear;
+    return {
+      gadam, mesCipars, mesVards,
+      periodYear:  curYear,
+      periodMonth: curMes,
+      period1Txt:  `${gadam}. gada ${mesVards}`,
+      periodTxt:   `${gadam}. gada ${mesVards}`,
+      nextMesCipars: String(nextMes).padStart(2,'0'),
+      nextGadam:     String(nextYear),
+    };
+  };
+
+  const handleSaveExtra = async () => {
+    if (!extraForm?.owner || !extraForm.apts?.length || !extraForm.lines?.some(l => l.nos?.trim())) return;
+    const pi = _extraPeriodInfo(extraForm);
+
+    const lines = extraForm.lines.filter(l => l.nos?.trim()).map(l => {
+      const daudz = parseFloat(l.daudz) || 0;
+      const cena  = parseFloat(l.cena)  || 0;
+      return { nos: l.nos.trim(), mv: l.mv||'', daudz, cena, summa: Math.round(daudz*cena*100)/100 };
+    });
+    const totalEur = Math.round(lines.reduce((s,l) => s+l.summa, 0) * 100) / 100;
+    const payDay = String(config[extraForm.apts[0]]?.payDay || 20).padStart(2,'0');
+    const paymentDue = `${payDay}.${pi.mesCipars}.${pi.gadam}`;
+    const recipientAddress = extraForm.apts.map(apt => `${company.address||''}, dz. ${apt}`).join('\n');
+    const sharedFields = {
+      period_year: pi.periodYear, period_month: pi.periodMonth,
+      period1_txt: pi.period1Txt, period_txt: pi.periodTxt,
+      apts: extraForm.apts, owner: extraForm.owner,
+      recipient_address: recipientAddress, lines, total_eur: totalEur, payment_due: paymentDue,
+    };
+
+    if (extraForm.id) {
+      const { error: updErr } = await supabase.from('extra_invoices').update(sharedFields).eq('id', extraForm.id);
+      if (updErr) { alert('Kļūda saglabājot:\n' + updErr.message); return; }
+    } else {
+      const { error: insErr } = await supabase.from('extra_invoices').insert(sharedFields);
+      if (insErr) { alert('Kļūda saglabājot papildu rēķinu:\n' + insErr.message); return; }
+    }
+    await loadExtraInvoices();
+    setExtraForm(null);
+  };
+
+  const _buildExtraBlock = async (inv) => {
+    const now = new Date();
+    const DAYS_LV   = ["svētdiena","pirmdiena","otrdiena","trešdiena","ceturtdiena","piektdiena","sestdiena"];
+    const MONTHS_LV = ["janvārī","februārī","martā","aprīlī","maijā","jūnijā","jūlijā","augustā","septembrī","oktobrī","novembrī","decembrī"];
+    const dateTxt = `${DAYS_LV[now.getDay()]}, ${now.getFullYear()}. gada ${now.getDate()}. ${MONTHS_LV[now.getMonth()]}`;
+    const logo = await resolveLogo(company);
+    return {
+      logo,
+      block: {
+        dateTxt, invoiceNr: inv.invoice_nr,
+        supplier: { nos: company.name||'', addr: company.address||'', reg: company.regNr||'', bank: company.bank||'', swift: company.swift||'', konts: company.account||'' },
+        owner: inv.owner, recipientAddress: inv.recipient_address,
+        period1Txt: '', periodTxt: '',
+        paymentDue: inv.payment_due, lines: inv.lines,
+        totalEur: parseFloat(inv.total_eur)||0,
+        wordsText: numVardiem(parseFloat(inv.total_eur)||0),
+        renderedFootnotes: [],
+      },
+    };
+  };
+
+  const handleExtraPdf = async (inv) => {
+    const [pdfLib, { InvoiceDocument: InvoiceDoc }] = await Promise.all([
+      import('@react-pdf/renderer'), import('./src/InvoicePdf.jsx'),
+    ]);
+    try { await ensureFonts(pdfLib); } catch(e) { alert("Fontu kļūda: " + e.message); return; }
+    const { logo, block } = await _buildExtraBlock(inv);
+    const el = React.createElement(InvoiceDoc, { blocks: [block], logo });
+    const pdfBlob = await pdfLib.pdf(el).toBlob();
+    const url = URL.createObjectURL(pdfBlob);
+    const a = document.createElement('a'); a.href = url;
+    a.download = `Rekins_${inv.invoice_nr}.pdf`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExtraEmail = async (inv) => {
+    const toEmail = (ownerEmails[inv.owner] || '').trim();
+    if (!toEmail) { alert(`Īpašniekam "${inv.owner}" nav norādīta e-pasta adrese.`); return; }
+    const emails = [toEmail];
+    const [pdfLib, { InvoiceDocument: InvoiceDoc }] = await Promise.all([
+      import('@react-pdf/renderer'), import('./src/InvoicePdf.jsx'),
+    ]);
+    try { await ensureFonts(pdfLib); } catch(e) { alert("Fontu kļūda: " + e.message); return; }
+    const { logo, block } = await _buildExtraBlock(inv);
+    const el = React.createElement(InvoiceDoc, { blocks: [block], logo });
+    const pdfBlob = await pdfLib.pdf(el).toBlob();
+    const pdfBase64 = await new Promise(res => { const r = new FileReader(); r.onloadend = () => res(r.result.split(',')[1]); r.readAsDataURL(pdfBlob); });
+    const emailCtx = { owner: inv.owner, invoiceNr: inv.invoice_nr, period: inv.period1_txt, dz: inv.apts.join(', '), kopsumma: parseFloat(inv.total_eur).toFixed(2), paymentDue: inv.payment_due };
+    const errs = [];
+    for (const toEmail of emails) {
+      const { error } = await supabase.functions.invoke('send-invoice', {
+        body: { to: toEmail, subject: renderFnText(emailSettings.subject, emailCtx), html: renderFnText(emailSettings.body, emailCtx), pdfBase64, filename: `Rekins_${inv.invoice_nr}.pdf` },
+      });
+      if (error) {
+        let msg = error.message;
+        try { const txt = await error.context?.text?.(); if (txt) { const j = JSON.parse(txt); if (j?.error) msg = j.error; } } catch {}
+        errs.push(`${toEmail}: ${msg}`);
+      }
+    }
+    alert(errs.length ? `Kļūdas:\n${errs.join('\n')}` : `✅ Nosūtīts uz: ${emails.join(', ')}`);
+  };
+
+  const handleDeleteExtra = async (id) => {
+    if (!window.confirm('Dzēst šo papildu rēķinu?')) return;
+    await supabase.from('extra_invoices').delete().eq('id', id);
+    await loadExtraInvoices();
+  };
 
   const handleSendEmails = async () => {
     if (!atskaite || !alokData) return;
@@ -1245,12 +1788,7 @@ export default function App({ onBack }) {
     setEmailProgress({ sent: 0, total: 0, errors: [], noEmail: [] });
     setErrPdf("");
 
-    let logo = null;
-    try {
-      const resp = await fetch('/' + (company.logoPath || 'Brivibas166logo.jpg'));
-      const blob = await resp.blob();
-      logo = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
-    } catch { logo = null; }
+    const logo = await resolveLogo(company);
 
     let blocks;
     try {
@@ -1264,16 +1802,17 @@ export default function App({ onBack }) {
         import('./src/InvoicePdf.jsx'),
       ]);
     } catch(e) { setErrPdf("PDF bibliotēka nav pieejama: " + e.message); setEmailSending(false); return; }
+    try { await ensureFonts(pdfLib); } catch(e) { setErrPdf("Fontu ielādes kļūda: " + e.message); setEmailSending(false); return; }
 
-    const blocksWithEmail = blocks.filter(b => (config[b.aptDz]?.email || '').trim());
-    const noEmail = blocks.filter(b => !(config[b.aptDz]?.email || '').trim()).map(b => b.aptDz);
+    const blocksWithEmail = blocks.filter(b => (ownerEmails[b.owner] || '').trim());
+    const noEmail = blocks.filter(b => !(ownerEmails[b.owner] || '').trim()).map(b => `${b.aptDz} (${b.owner})`);
 
     setEmailProgress({ sent: 0, total: blocksWithEmail.length, errors: [], noEmail });
 
     // ── 3. Sūtīt ──
     let sent = 0;
     for (const block of blocksWithEmail) {
-      const toEmail = (config[block.aptDz]?.email || '').trim();
+      const toEmail = (ownerEmails[block.owner] || '').trim();
       const emailCtx = {
         owner: block.owner, invoiceNr: block.invoiceNr,
         period: block.period1Txt, dz: block.aptDz,
@@ -1323,7 +1862,55 @@ export default function App({ onBack }) {
     const parts = periodClean.split("-");
     const yyyy = parts[0]?.padStart(4,"0") || "0000";
     const mm   = parts[1]?.padStart(2,"0") || "00";
-    XLSX.writeFile(buildXlsx(atskaite,alokData,config,men,effCirkulTarif,pozicijas,company,footnotes),`DZIB_Kopsavilkums_${yyyy}_${mm}.xlsx`,{cellStyles:true});
+    const _now = new Date();
+    const menY = String(men.year || _now.getFullYear());
+    const menM = String(men.monthNum || (_now.getMonth()+1)).padStart(2,'0');
+    const periodYear  = parseInt(menY);
+    const periodMonth = parseInt(menM);
+    const { data: _extraData2 } = await supabase.from('extra_invoices').select('*')
+      .eq('period_year', periodYear).eq('period_month', periodMonth);
+    const extraForPeriod = _extraData2 || [];
+    const rekStart = Math.max(1, parseInt(men.invoiceNrStart)||1);
+    const mergedCount = mergeData(atskaite, alokData, config).length;
+    const numberedExtras = extraForPeriod.map((inv, ei) => ({
+      ...inv,
+      invoice_nr: `B${menY}${menM}${String(rekStart + mergedCount + ei).padStart(4,'0')}`,
+    }));
+    for (const inv of numberedExtras) {
+      await supabase.from('extra_invoices').update({ invoice_nr: inv.invoice_nr }).eq('id', inv.id);
+    }
+    if (numberedExtras.length) await loadExtraInvoices();
+
+    // ── Tenant invoices (pilnie rēķini) ───────────────────────────────────
+    let regBlocks = [];
+    try { ({ blocks: regBlocks } = _buildInvoiceBlocks(atskaite, alokData, config, men, effCirkulTarif, pozicijas, null, company, footnotes)); } catch {}
+
+    const alokIrnieksMapX = {};
+    for (const al of (alokData || [])) { if (al.irnieks) alokIrnieksMapX[String(al.dz)] = al.irnieks; }
+    const tenantAptsXlsx = sortApts(Object.keys(alokIrnieksMapX)).filter(apt =>
+      fullInvConfig[apt]?.enabled !== false
+    );
+    const fullInvsForXlsx = tenantAptsXlsx.flatMap((apt, fi) => {
+      const regBlock = regBlocks.find(b => b.aptDz === apt);
+      if (!regBlock) return [];
+      const cfg = fullInvConfig[apt];
+      if (cfg?.recipientName) {
+        try {
+          const fullBlock = _buildFullBlock(apt, regBlock, cfg, pozicijas, company);
+          const nr = regBlock.invoiceNr.replace(/^B/, 'S');
+          fullBlock.invoiceNr = nr;
+          return [{ invoice_nr: nr, apt, owner: fullBlock.owner, recipient_address: fullBlock.recipientAddress, payment_due: fullBlock.paymentDue || '', lines: fullBlock.lines, total_eur: fullBlock.totalEur }];
+        } catch { return []; }
+      }
+      const irnieks = alokIrnieksMapX[apt];
+      const nr = regBlock.invoiceNr.replace(/^B/, 'S');
+      return [{ invoice_nr: nr, apt, owner: irnieks, recipient_address: regBlock.recipientAddress, payment_due: regBlock.paymentDue || '', lines: regBlock.lines, total_eur: regBlock.totalEur }];
+    });
+
+    XLSX.writeFile(buildXlsx(atskaite,alokData,config,men,effCirkulTarif,pozicijas,company,footnotes,numberedExtras),`DZIB_Kopsavilkums_${yyyy}_${mm}.xlsx`,{cellStyles:true});
+    if (fullInvsForXlsx.length) {
+      XLSX.writeFile(buildIrnieku(fullInvsForXlsx, company), `DZIB_Irnieki_${yyyy}_${mm}.xlsx`, {cellStyles:true});
+    }
     setDone(true);
   };
 
@@ -1331,12 +1918,7 @@ export default function App({ onBack }) {
     if (!atskaite || !alokData) return;
     setErrPdf("");
 
-    let logo = null;
-    try {
-      const resp = await fetch('/' + (company.logoPath || 'Brivibas166logo.jpg'));
-      const blob = await resp.blob();
-      logo = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
-    } catch { logo = null; }
+    const logo = await resolveLogo(company);
 
     let blocks;
     try {
@@ -1354,6 +1936,12 @@ export default function App({ onBack }) {
       ]);
     } catch(e) {
       setErrPdf("PDF bibliotēka nav pieejama: " + e.message);
+      return false;
+    }
+    try {
+      await ensureFonts(pdfLib);
+    } catch(e) {
+      setErrPdf("Fontu ielādes kļūda: " + e.message);
       return false;
     }
 
@@ -1390,6 +1978,106 @@ export default function App({ onBack }) {
       }));
       await supabase.from('issued_invoices').upsert(rows, { onConflict: 'invoice_nr' });
     } catch(e) { console.error('saveInvoicesDb:', e); }
+
+    // ── Extra invoices for this period ───────────────────────────────────────
+    const _now2 = new Date();
+    const gadam2     = String(men.year     || _now2.getFullYear());
+    const mesCipars2 = String(men.monthNum || (_now2.getMonth()+1)).padStart(2,'0');
+    const periodYear2  = parseInt(gadam2);
+    const periodMonth2 = parseInt(mesCipars2);
+    const rekNrSakums2 = Math.max(1, parseInt(men.invoiceNrStart)||1);
+    const { data: _extraData, error: _extraErr } = await supabase.from('extra_invoices').select('*')
+      .eq('period_year', periodYear2).eq('period_month', periodMonth2);
+    if (_extraErr) { setErrPdf(`Papildu rēķinu DB kļūda: ${_extraErr.message}`); return false; }
+    const extraForPdf = _extraData || [];
+
+    for (let ei = 0; ei < extraForPdf.length; ei++) {
+      const inv = extraForPdf[ei];
+      const newNr = `B${gadam2}${mesCipars2}${String(rekNrSakums2 + blocks.length + ei).padStart(4,'0')}`;
+      const invWithNr = { ...inv, invoice_nr: newNr };
+      try {
+        const { logo: eLogo, block: eBlock } = await _buildExtraBlock(invWithNr);
+        const el = React.createElement(InvoiceDoc, { blocks: [eBlock], logo: eLogo });
+        const blob = await pdfLib.pdf(el).toBlob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `Rekins_${newNr}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        await supabase.from('extra_invoices').update({ invoice_nr: newNr }).eq('id', inv.id);
+        await supabase.from('issued_invoices').upsert({
+          invoice_nr:   newNr,
+          apt:          (inv.apts||[]).join(', '),
+          owner:        inv.owner,
+          period_year:  periodYear2,
+          period_month: periodMonth2,
+          payment_due:  inv.payment_due,
+          total_eur:    parseFloat(inv.total_eur) || 0,
+          lines:        inv.lines,
+        }, { onConflict: 'invoice_nr' });
+      } catch(e) {
+        setErrPdf(`Papildu rēķins ${inv.owner}: ${e.message}`);
+        return false;
+      }
+      await new Promise(r => setTimeout(r, 300));
+    }
+    if (extraForPdf.length) await loadExtraInvoices();
+
+    // ── Tenant invoices — source: alokatoru Excel irnieks column ─────────────
+    // All apartments with irnieks set are included unless explicitly disabled (enabled===false)
+    const alokIrnieksMap = {};
+    for (const al of (alokData || [])) {
+      if (al.irnieks) alokIrnieksMap[String(al.dz)] = al.irnieks;
+    }
+    const tenantApts = sortApts(Object.keys(alokIrnieksMap)).filter(apt =>
+      fullInvConfig[apt]?.enabled !== false
+    );
+
+    const downloadPdf = async (block, filename) => {
+      const el = React.createElement(InvoiceDoc, { blocks: [block], logo });
+      const blob = await pdfLib.pdf(el).toBlob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    };
+
+    for (let fi = 0; fi < tenantApts.length; fi++) {
+      const apt = tenantApts[fi];
+      const regBlock = blocks.find(b => b.aptDz === apt);
+      if (!regBlock) continue;
+      const cfg = fullInvConfig[apt];
+      let tenantBlock;
+      if (cfg?.recipientName) {
+        try {
+          tenantBlock = _buildFullBlock(apt, regBlock, cfg, pozicijas, company);
+        } catch(e) {
+          setErrPdf(`Īrnieka rēķins ${apt}: ${e.message}`);
+          return false;
+        }
+      } else {
+        tenantBlock = { ...regBlock, owner: alokIrnieksMap[apt], renderedFootnotes: [] };
+      }
+      const nr = regBlock.invoiceNr.replace(/^B/, 'S');
+      tenantBlock.invoiceNr = nr;
+      try {
+        await downloadPdf(tenantBlock, `Rekins_${nr}-${apt}.pdf`);
+        await supabase.from('issued_invoices').upsert({
+          invoice_nr: nr, apt, owner: tenantBlock.owner,
+          period_year: periodYear2, period_month: periodMonth2,
+          payment_due: tenantBlock.paymentDue, total_eur: tenantBlock.totalEur, lines: tenantBlock.lines,
+        }, { onConflict: 'invoice_nr' });
+      } catch(e) {
+        setErrPdf(`Īrnieka rēķins ${apt}: ${e.message}`);
+        return false;
+      }
+      await new Promise(r => setTimeout(r, 300));
+    }
+
     return true;
   };
 
@@ -1475,9 +2163,37 @@ export default function App({ onBack }) {
                 {/* Kreisā kolonna */}
                 <div style={{borderRight:"1px solid #e0eaf2"}}>
                   <MenSec>Periods</MenSec>
-                  <MenInp label="Gads" type="text" unit="" note="piem. 2026" value={men.year} onChange={e=>updateMen("year",e.target.value)} onBlur={saveMenField}/>
-                  <MenInp label="Mēnesis (cipars)" type="text" unit="" note="piem. 03" value={men.monthNum} onChange={e=>updateMen("monthNum",e.target.value)} onBlur={saveMenField}/>
-                  <MenInp label="Mēnesis (vārds)" type="text" unit="" note="piem. MARTS" value={men.monthName} onChange={e=>updateMen("monthName",e.target.value)} onBlur={saveMenField}/>
+                  <div style={{display:"flex",alignItems:"center",gap:8,padding:"7px 20px",borderBottom:"1px solid var(--surface)"}}>
+                    <div style={{flex:"0 0 240px"}}>
+                      <div style={{fontSize:12,color:"var(--text-1)",fontWeight:500}}>Periods (gads un mēnesis)</div>
+                      {men.period && (() => {
+                        const _m = parseInt(men.monthNum||0,10);
+                        const _y = parseInt(men.year||0);
+                        const prevM = _m === 1 ? 12 : _m - 1;
+                        const prevY = _m === 1 ? _y - 1 : _y;
+                        return <div style={{fontSize:10,color:"var(--text-3)",marginTop:1}}>
+                          {"Komunālie: "}{MNES[prevM-1] || ""} {prevY}
+                          {" · Apsaimniekošana: "}{MNES[_m-1] || ""} {_y}
+                        </div>;
+                      })()}
+                    </div>
+                    <input
+                      type="month"
+                      value={men.period || ""}
+                      onChange={e => {
+                        const val = e.target.value;
+                        if (!val) return;
+                        const [y, m] = val.split("-");
+                        const monthName = MNES[parseInt(m, 10) - 1] || "";
+                        const next = { ...men, period: val, year: y, monthNum: m, monthName };
+                        setMen(next);
+                        saveMenDb(next);
+                      }}
+                      style={{flex:1,padding:"5px 9px",fontFamily:"DM Mono,monospace",fontSize:13,
+                        fontWeight:600,border:"1.5px solid var(--border-2)",borderRadius:"var(--r-sm)",
+                        outline:"none",background:men.period?"#fff":"var(--surface)",color:"var(--blue-900)"}}
+                    />
+                  </div>
                   <MenInp label="Rēķinu sākuma nr." type="number" unit="" note="piem. 1 → B20260300001" value={men.invoiceNrStart} onChange={e=>updateMen("invoiceNrStart",e.target.value)} onBlur={saveMenField}/>
 
                   <MenSec>Rēķinu kopsummas (€)</MenSec>
@@ -1527,6 +2243,8 @@ export default function App({ onBack }) {
                   {id:'fn',    icon:'📝', label:'Zemsvītras piezīmes'},
                   {id:'comp',  icon:'🏢', label:'Uzņēmuma rekvizīti'},
                   {id:'email', icon:'✉', label:'Epasta iestatījumi'},
+                  {id:'extra', icon:'+', label:'Papildu rēķini'},
+                  {id:'full',  icon:'⊞', label:'Īrnieku rēķini'},
                 ].map(t => (
                   <button key={t.id}
                     className={`panel-tab${activePanel===t.id?' active':''}`}
@@ -1552,11 +2270,10 @@ export default function App({ onBack }) {
                               <th style={{color:"#7F6000"}}>Personas</th>
                               <th style={{color:"#1F4E79"}}>Cirk. grupas</th>
                               <th style={{color:"#1F4E79"}}>Apm. diena</th>
-                              <th>E-pasts</th>
                               <th style={{width:28}}/>
                             </tr></thead>
                             <tbody>
-                              {Object.entries(config).map(([dz,c])=>(
+                              {sortApts(Object.keys(config)).map(dz => { const c = config[dz]; return (
                                 <React.Fragment key={dz}>
                                   <tr>
                                     <td style={{textAlign:"center"}}>
@@ -1572,7 +2289,6 @@ export default function App({ onBack }) {
                                     <td><input className="ci" type="number" min="0" value={c.residents??""} placeholder="0" onChange={e=>updateCfg(dz,"residents",e.target.value)} onBlur={saveCfgNow}/></td>
                                     <td><input className="ci" type="number" min="0" step="0.5" value={c.circGroup??""} placeholder="0" onChange={e=>updateCfg(dz,"circGroup",e.target.value)} onBlur={saveCfgNow}/></td>
                                     <td><input className="ci" type="number" min="1" max="31" value={c.payDay??20} placeholder="20" onChange={e=>updateCfg(dz,"payDay",e.target.value)} onBlur={saveCfgNow}/></td>
-                                    <td><input className="ci em" type="email" value={c.email||""} placeholder="epasts@piemers.lv" onChange={e=>updateCfg(dz,"email",e.target.value)} onBlur={saveCfgNow}/></td>
                                     <td style={{textAlign:"center"}}>
                                       <button onClick={()=>{ if(window.confirm(`Dzēst dz. ${dz}?`)) deleteCfg(dz); }}
                                         title="Dzēst dzīvokli"
@@ -1640,7 +2356,8 @@ export default function App({ onBack }) {
                                     </tr>
                                   )}
                                 </React.Fragment>
-                              ))}
+                              ); })}
+
                             </tbody>
                           </table>
                         </div>
@@ -1663,6 +2380,7 @@ export default function App({ onBack }) {
                         <th style={{width:36,padding:"7px 10px",textAlign:"center",fontWeight:600,fontSize:11,letterSpacing:".3px"}}>#</th>
                         <th style={{width:48,padding:"7px 8px",textAlign:"center",fontWeight:600,fontSize:11}}>Aktīva</th>
                         <th style={{padding:"7px 12px",textAlign:"left",fontWeight:600,fontSize:11}}>Pozīcija</th>
+                        <th style={{width:110,padding:"7px 8px",textAlign:"left",fontWeight:600,fontSize:11}}>Mērvienība</th>
                         <th style={{width:60,padding:"7px 8px",textAlign:"center",fontWeight:600,fontSize:11}}>Kārtot</th>
                       </tr>
                     </thead>
@@ -1675,6 +2393,13 @@ export default function App({ onBack }) {
                               style={{width:15,height:15,cursor:"pointer",accentColor:"#2E75B6"}}/>
                           </td>
                           <td style={{padding:"6px 12px",color:p.on?"#1a2733":"#aab8c5",fontWeight:p.on?500:400}}>{p.label}</td>
+                          <td style={{padding:"4px 8px"}}>
+                            <select value={p.mv||''} onChange={e=>updatePoz(pozicijas.map((q,j)=>j===i?{...q,mv:e.target.value}:q))}
+                              style={{fontSize:11,padding:"2px 4px",border:"1px solid #ccd8e8",borderRadius:4,width:"100%",background:"#fff",color:"#1a2733"}}>
+                              <option value="">—</option>
+                              {['m²','m³','dz.','iedz.','mēnesis','telpa','vienība'].map(u=><option key={u} value={u}>{u}</option>)}
+                            </select>
+                          </td>
                           <td style={{textAlign:"center",padding:"4px 6px"}}>
                             <div style={{display:"flex",gap:3,justifyContent:"center"}}>
                               <button onClick={()=>movePoz(i,-1)} disabled={i===0} title="Pārvietot augstāk"
@@ -1756,7 +2481,7 @@ export default function App({ onBack }) {
                 <div className="panel-body" style={{padding:"14px 16px"}}>
                   <div style={{fontWeight:700,fontSize:11,color:"#1F4E79",marginBottom:4,textTransform:"uppercase",letterSpacing:".5px"}}>Epasta iestatījumi</div>
                   <div style={{fontSize:11,color:"#7a9ab5",marginBottom:12}}>
-                    Rēķins tiek pievienots kā PDF pielikums. Epastu adrese katram dzīvoklim — dzīvokļu konfigurācijā.
+                    Rēķins tiek pievienots kā PDF pielikums. E-pasta adreses norādītas zemāk pēc iedzīvotāja.
                   </div>
 
                   <div style={{marginBottom:10}}>
@@ -1800,13 +2525,44 @@ export default function App({ onBack }) {
                     </table>
                   </div>
 
-                  <div style={{marginTop:12,padding:"8px 12px",background:"#fff8e1",borderRadius:6,border:"1px solid #ffe082",fontSize:10.5,color:"#7a5800"}}>
-                    <b>Uzstādīšana:</b> Supabase Dashboard → Settings → Edge Functions → Secrets:<br/>
-                    <code style={{fontSize:10}}>GMAIL_USER</code> — Gmail adrese (no kuras sūta)<br/>
-                    <code style={{fontSize:10}}>GMAIL_APP_PASSWORD</code> — Gmail App Password (Google konts → Drošība → Lietotnes paroles)<br/>
-                    <code style={{fontSize:10}}>GMAIL_FROM_NAME</code> — Sūtītāja vārds (piem., "Brīvības 166 pārvaldnieks")<br/>
-                    <br/>Funkcija jāizdeplojē: <code style={{fontSize:10}}>supabase functions deploy send-invoice</code>
+                  {/* ── Iedzīvotāju e-pasta adreses ── */}
+                  <div style={{marginTop:16,marginBottom:10}}>
+                    <div style={{fontWeight:700,fontSize:11,color:"#1F4E79",marginBottom:8,textTransform:"uppercase",letterSpacing:".5px"}}>Iedzīvotāju e-pasta adreses</div>
+                    {(() => {
+                      const uniqueOwners = [...new Set(Object.values(config).map(c=>c.owner||'').filter(Boolean))].sort();
+                      if (!uniqueOwners.length) return <div style={{fontSize:12,color:"#aaa"}}>Nav dzīvokļu konfigurācijas datu</div>;
+                      return (
+                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                          <thead>
+                            <tr style={{background:"#f0f5fa"}}>
+                              <th style={{padding:"5px 8px",textAlign:"left",fontWeight:600,fontSize:11,color:"#1F4E79"}}>Iedzīvotājs</th>
+                              <th style={{padding:"5px 8px",textAlign:"left",fontWeight:600,fontSize:11,color:"#888"}}>Dzīvokļi</th>
+                              <th style={{padding:"5px 8px",textAlign:"left",fontWeight:600,fontSize:11,color:"#1F4E79"}}>E-pasta adrese</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {uniqueOwners.map((owner,i) => {
+                              const apts = Object.entries(config).filter(([,c])=>c.owner===owner).map(([dz])=>dz).join(', ');
+                              return (
+                                <tr key={owner} style={{background:i%2===0?"#fff":"#f7fafd",borderBottom:"1px solid #e0eaf2"}}>
+                                  <td style={{padding:"5px 8px",fontWeight:500}}>{owner}</td>
+                                  <td style={{padding:"5px 8px",color:"#888",fontFamily:"monospace",fontSize:11}}>dz. {apts}</td>
+                                  <td style={{padding:"4px 8px"}}>
+                                    <input type="email" value={ownerEmails[owner]||""}
+                                      placeholder="epasts@piemers.lv"
+                                      onChange={e=>{const v=e.target.value;setOwnerEmails(prev=>({...prev,[owner]:v}));}}
+                                      onBlur={()=>saveOwnerEmails(ownerEmails)}
+                                      style={{width:"100%",padding:"4px 7px",border:"1px solid #c8dce8",borderRadius:4,fontSize:12,boxSizing:"border-box"}}/>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      );
+                    })()}
                   </div>
+
                 </div>
               )}
 
@@ -1837,7 +2593,6 @@ export default function App({ onBack }) {
                       {[
                         ["title",      "Lietotnes virsraksts",  "piem. DZĪB Brīvības 166 Rēķinu sagatavotājs"],
                         ["buildingId", "Mājas identifikators",  "piem. 166 (filtrē mājas skaitītāju F1 failā)"],
-                        ["logoPath",   "Logo faila nosaukums",  "piem. Brivibas166logo.jpg (public/ mapē)"],
                       ].map(([f, lbl, note]) => (
                         <div key={f} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:"1px solid #f0f4f8"}}>
                           <div style={{flex:"0 0 160px",fontSize:12,color:"#1a2733",fontWeight:500}}>{lbl}</div>
@@ -1847,10 +2602,314 @@ export default function App({ onBack }) {
                             style={{flex:1,width:"auto"}}/>
                         </div>
                       ))}
+                      <div style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:"1px solid #f0f4f8"}}>
+                        <div style={{flex:"0 0 160px",fontSize:12,color:"#1a2733",fontWeight:500}}>Logo</div>
+                        <div style={{display:"flex",alignItems:"center",gap:8,flex:1}}>
+                          {company.logoData
+                            ? <img src={company.logoData} alt="logo" style={{height:36,maxWidth:120,objectFit:"contain",border:"1px solid #e0e0e0",borderRadius:3,background:"#fafafa",padding:2}}/>
+                            : <span style={{fontSize:11,color:"#aaa"}}>Nav logo</span>
+                          }
+                          <label style={{cursor:"pointer",background:"#e8f0fe",color:"#1a73e8",border:"1px solid #c5d8f7",borderRadius:4,padding:"3px 10px",fontSize:11,fontWeight:500}}>
+                            Augšupielādēt
+                            <input type="file" accept="image/*" style={{display:"none"}} onChange={e=>{
+                              const file = e.target.files[0]; if (!file) return;
+                              const r = new FileReader();
+                              r.onloadend = () => setCompany(prev => { const next={...prev,logoData:r.result}; saveCompanyDb(next); return next; });
+                              r.readAsDataURL(file);
+                              e.target.value='';
+                            }}/>
+                          </label>
+                          {company.logoData && <button style={{cursor:"pointer",background:"none",border:"none",color:"#c00",fontSize:11,padding:"2px 6px"}} onClick={()=>setCompany(prev=>{const next={...prev,logoData:''}; saveCompanyDb(next); return next;})}>Noņemt</button>}
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
               )}
+
+              {activePanel==='extra' && (() => {
+                const ownerGroups = Object.entries(config).reduce((acc, [dz, cfg]) => {
+                  const o = (cfg.owner||'').trim(); if (!o) return acc;
+                  if (!acc[o]) acc[o] = []; acc[o].push(dz); return acc;
+                }, {});
+                const owners = Object.keys(ownerGroups).sort();
+                const emptyLine = { nos:'', mv:'', daudz:'', cena:'' };
+                const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString('lv-LV') : '';
+
+                if (!extraForm) return (
+                  <div className="panel-body" style={{padding:"14px 16px"}}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+                      <div style={{fontWeight:700,fontSize:11,color:"#1F4E79",textTransform:"uppercase",letterSpacing:".5px"}}>Papildu rēķini</div>
+                      <button className="btn-primary" style={{padding:"5px 14px",fontSize:12}} onClick={()=>setExtraForm({periodMode:'settings',customPeriod:'',owner:'',apts:[],lines:[{...emptyLine}]})}>+ Jauns rēķins</button>
+                    </div>
+                    {extraInvoices.length===0
+                      ? <div style={{fontSize:12,color:"#888",padding:"20px 0",textAlign:'center'}}>Nav papildu rēķinu</div>
+                      : <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                          <thead>
+                            <tr style={{background:'#1F4E79',color:'#fff'}}>
+                              {['Īpašnieks','Dz.','Periods','Summa','Rēķina datums',''].map(h=>(
+                                <th key={h} style={{padding:'5px 8px',textAlign:'left',fontWeight:600,fontSize:11}}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {extraInvoices.map((inv,i)=>(
+                              <tr key={inv.id} style={{background:i%2===0?'#fff':'#f5f8fc',borderBottom:'1px solid #e0eaf2'}}>
+                                <td style={{padding:'5px 8px'}}>{inv.owner}</td>
+                                <td style={{padding:'5px 8px'}}>{(inv.apts||[]).join(', ')}</td>
+                                <td style={{padding:'5px 8px'}}>{inv.period1_txt}</td>
+                                <td style={{padding:'5px 8px',textAlign:'right',fontWeight:600}}>{parseFloat(inv.total_eur).toFixed(2)} €</td>
+                                <td style={{padding:'5px 8px',color:'#888'}}>{new Date().toLocaleDateString('lv-LV')}</td>
+                                <td style={{padding:'5px 4px',whiteSpace:'nowrap'}}>
+                                  <button className="btn-secondary" style={{padding:'3px 8px',fontSize:11,marginRight:3}} onClick={()=>{
+                                    const periodYear=parseInt(men.year||0), periodMonth=parseInt(men.monthNum||0);
+                                    const samePeriod = inv.period_year===periodYear && inv.period_month===periodMonth;
+                                    const cp = `${String(inv.period_year).padStart(4,'0')}-${String(inv.period_month).padStart(2,'0')}`;
+                                    setExtraForm({ id:inv.id, invoice_nr:inv.invoice_nr, periodMode:samePeriod?'settings':'custom', customPeriod:samePeriod?'':cp, owner:inv.owner, apts:inv.apts||[], lines:(inv.lines||[]).map(l=>({nos:l.nos,mv:l.mv||'',daudz:String(l.daudz),cena:String(l.cena)})) });
+                                  }}>Labot</button>
+                                  <button style={{padding:'3px 7px',fontSize:11,background:'none',border:'1px solid #e0a0a0',color:'#c0392b',borderRadius:4,cursor:'pointer'}} onClick={()=>handleDeleteExtra(inv.id)}>×</button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                    }
+                  </div>
+                );
+
+                const totalExtra = extraForm.lines.reduce((s,l) => s + (parseFloat(l.daudz)||0)*(parseFloat(l.cena)||0), 0);
+                const settingsPeriodLabel = men.period ? `${MNES[parseInt(men.monthNum||0,10)-1]||''} ${men.year}` : 'nav iestatīts';
+                return (
+                  <div className="panel-body" style={{padding:"14px 16px"}}>
+                    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:14}}>
+                      <button className="btn-secondary" style={{padding:'4px 10px',fontSize:12}} onClick={()=>setExtraForm(null)}>← Atpakaļ</button>
+                      <div style={{fontWeight:700,fontSize:11,color:"#1F4E79",textTransform:"uppercase",letterSpacing:".5px"}}>{extraForm.id ? 'Labot papildu rēķinu' : 'Jauns papildu rēķins'}</div>
+                    </div>
+
+                    {/* Owner + period */}
+                    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:12}}>
+                      <div>
+                        <div style={{fontSize:11,fontWeight:600,color:'#555',marginBottom:4}}>Īpašnieks</div>
+                        <select value={extraForm.owner}
+                          onChange={e => { const o=e.target.value; setExtraForm(f=>({...f,owner:o,apts:ownerGroups[o]||[]})); }}
+                          style={{width:'100%',padding:'5px 8px',border:'1.5px solid var(--border-2)',borderRadius:'var(--r-sm)',fontSize:13,color:'var(--blue-900)'}}>
+                          <option value="">— izvēlieties —</option>
+                          {owners.map(o=>(
+                            <option key={o} value={o}>{o} (dz. {(ownerGroups[o]||[]).join(', ')})</option>
+                          ))}
+                        </select>
+                        {extraForm.apts.length>0 && <div style={{fontSize:10,color:'#888',marginTop:3}}>Dzīvokļi: {extraForm.apts.join(', ')}</div>}
+                      </div>
+                      <div>
+                        <div style={{fontSize:11,fontWeight:600,color:'#555',marginBottom:4}}>Periods</div>
+                        <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                          <label style={{fontSize:12,display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
+                            <input type="radio" name="periodMode" value="settings" checked={extraForm.periodMode==='settings'} onChange={()=>setExtraForm(f=>({...f,periodMode:'settings'}))}/>
+                            No iestatījumiem: <strong>{settingsPeriodLabel}</strong>
+                          </label>
+                          <label style={{fontSize:12,display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
+                            <input type="radio" name="periodMode" value="custom" checked={extraForm.periodMode==='custom'} onChange={()=>setExtraForm(f=>({...f,periodMode:'custom'}))}/>
+                            Cits periods:
+                            <input type="month" value={extraForm.customPeriod}
+                              onChange={e=>setExtraForm(f=>({...f,customPeriod:e.target.value,periodMode:'custom'}))}
+                              style={{marginLeft:4,padding:'2px 6px',border:'1.5px solid var(--border-2)',borderRadius:'var(--r-sm)',fontSize:12}}/>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Line items */}
+                    <datalist id="extra-poz-list">
+                      {pozicijas.map(p => <option key={p.id} value={p.label}/>)}
+                    </datalist>
+                    <div style={{fontSize:11,fontWeight:600,color:'#555',marginBottom:6}}>Pozīcijas</div>
+                    {extraForm.lines.map((l,i)=>{
+                      const summa = Math.round((parseFloat(l.daudz)||0)*(parseFloat(l.cena)||0)*100)/100;
+                      const inpSt = {padding:'4px 7px',border:'1.5px solid var(--border-2)',borderRadius:'var(--r-sm)',fontSize:12,color:'var(--blue-900)',background:'#fff',width:'100%'};
+                      const lbl = (t) => <div style={{fontSize:10,color:'#888',fontWeight:600,marginBottom:2,textTransform:'uppercase',letterSpacing:'.3px'}}>{t}</div>;
+                      return (
+                        <div key={i} style={{display:'flex',gap:8,alignItems:'flex-end',padding:'7px 8px',marginBottom:4,background:i%2===0?'#f5f8fc':'#fff',borderRadius:6,border:'1px solid #e0eaf2'}}>
+                          <div style={{flex:1}}>
+                            {lbl('Nosaukums')}
+                            <input value={l.nos} list="extra-poz-list" placeholder="Izvēlēties vai ievadīt..."
+                              onChange={e=>{const val=e.target.value;const match=pozicijas.find(p=>p.label===val);setExtraForm(f=>({...f,lines:f.lines.map((r,j)=>j===i?{...r,nos:val,mv:match?.mv??r.mv}:r)}));}}
+                              style={inpSt}/>
+                          </div>
+                          <div style={{width:110}}>
+                            {lbl('Mērvienība')}
+                            <select value={l.mv} onChange={e=>setExtraForm(f=>({...f,lines:f.lines.map((r,j)=>j===i?{...r,mv:e.target.value}:r)}))} style={{...inpSt,width:'100%'}}>
+                              <option value="">—</option>
+                              {['m²','m³','dz.','iedz.','mēnesis','telpa','vienība'].map(u=><option key={u} value={u}>{u}</option>)}
+                            </select>
+                          </div>
+                          <div style={{width:90}}>
+                            {lbl('Daudzums')}
+                            <input type="number" step="0.001" value={l.daudz} onChange={e=>setExtraForm(f=>({...f,lines:f.lines.map((r,j)=>j===i?{...r,daudz:e.target.value}:r)}))} style={{...inpSt,textAlign:'right'}}/>
+                          </div>
+                          <div style={{width:90}}>
+                            {lbl('Cena (€)')}
+                            <input type="number" step="0.01" value={l.cena} onChange={e=>setExtraForm(f=>({...f,lines:f.lines.map((r,j)=>j===i?{...r,cena:e.target.value}:r)}))} style={{...inpSt,textAlign:'right'}}/>
+                          </div>
+                          <div style={{width:80,textAlign:'right'}}>
+                            {lbl('Summa (€)')}
+                            <div style={{padding:'4px 7px',fontWeight:700,fontSize:13,color:'#1F4E79'}}>{summa.toFixed(2)}</div>
+                          </div>
+                          <div style={{width:24,paddingBottom:2}}>
+                            {extraForm.lines.length>1 && <button onClick={()=>setExtraForm(f=>({...f,lines:f.lines.filter((_,j)=>j!==i)}))} style={{background:'none',border:'none',color:'#c0392b',fontSize:16,cursor:'pointer',lineHeight:1,padding:0}}>×</button>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
+                      <button className="btn-secondary" style={{padding:'4px 10px',fontSize:12}} onClick={()=>setExtraForm(f=>({...f,lines:[...f.lines,{...emptyLine}]}))}>+ Pievienot rindu</button>
+                      <div style={{fontSize:13,fontWeight:700,color:'#1F4E79'}}>Kopā: {Math.round(totalExtra*100)/100} EUR</div>
+                    </div>
+                    <button className="btn-primary" style={{padding:'7px 20px',fontSize:13}}
+                      disabled={!extraForm.owner || !extraForm.apts.length || !extraForm.lines.some(l=>l.nos?.trim())}
+                      onClick={handleSaveExtra}>
+                      {extraForm.id ? 'Saglabāt izmaiņas' : 'Saglabāt rēķinu'}
+                    </button>
+                  </div>
+                );
+              })()}
+
+              {activePanel==='full' && (() => {
+                const apts = sortApts(Object.keys(config));
+                const emptyFree = {nos:'',mv:'',daudz:'',cena:''};
+                const MV_OPTS = ['m²','m³','dz.','iedz.','mēnesis','telpa','vienība','kWh'];
+                const inpSt = {padding:'4px 7px',border:'1.5px solid var(--border-2)',borderRadius:'var(--r-sm)',fontSize:12,color:'var(--blue-900)',background:'#fff',width:'100%'};
+                const lbl = (t) => <div style={{fontSize:10,color:'#888',fontWeight:600,marginBottom:2,textTransform:'uppercase',letterSpacing:'.3px'}}>{t}</div>;
+
+                if (fullInvEditApt === null) return (
+                  <div className="panel-body" style={{padding:'14px 16px'}}>
+                    <div style={{fontWeight:700,fontSize:11,color:'#1F4E79',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:10}}>Īrnieku rēķini</div>
+                    {apts.length === 0
+                      ? <div style={{fontSize:12,color:'#888',textAlign:'center',padding:'20px 0'}}>Nav dzīvokļu konfigurācijas</div>
+                      : <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                          <thead>
+                            <tr style={{background:'#1F4E79',color:'#fff'}}>
+                              {['Dz.','Īpašnieks','Saņēmējs','E-pasts',''].map(h=>(
+                                <th key={h} style={{padding:'5px 8px',textAlign:'left',fontWeight:600,fontSize:11}}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {apts.map((apt,i)=>{
+                              const ac = fullInvConfig[apt] || {};
+                              const alIrnieks = (alokData||[]).find(a=>String(a.dz)===String(apt))?.irnieks || '';
+                              const willGenerate = !!alIrnieks && ac.enabled !== false;
+                              return (
+                                <tr key={apt} style={{background:i%2===0?'#fff':'#f5f8fc',borderBottom:'1px solid #e0eaf2',opacity:alIrnieks?(ac.enabled===false?0.45:1):0.35}}>
+                                  <td style={{padding:'5px 8px',fontFamily:'monospace',fontWeight:700,color:'#1F4E79'}}>{apt}</td>
+                                  <td style={{padding:'5px 8px',color:'#555'}}>{config[apt]?.owner||'—'}</td>
+                                  <td style={{padding:'5px 8px'}}>{ac.recipientName || (alIrnieks ? <span style={{color:'#888'}}>{alIrnieks}</span> : <span style={{color:'#bbb'}}>—</span>)}</td>
+                                  <td style={{padding:'5px 8px',color:'#888'}}>{ac.email||<span style={{color:'#bbb'}}>—</span>}</td>
+                                  <td style={{padding:'5px 4px',whiteSpace:'nowrap',display:'flex',gap:4,alignItems:'center'}}>
+                                    <input type="checkbox" checked={willGenerate} disabled={!alIrnieks}
+                                      onChange={e=>updateFullApt(apt,{enabled:e.target.checked?undefined:false})}
+                                      title={alIrnieks?'Ieslēgt/izslēgt īrnieka rēķinu':'Nav īrnieka datos'} style={{width:14,height:14,cursor:alIrnieks?'pointer':'default',accentColor:'#2E75B6'}}/>
+                                    <button className="btn-secondary" style={{padding:'3px 8px',fontSize:11}} onClick={()=>setFullInvEditApt(apt)}>Konfigurēt</button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                    }
+                  </div>
+                );
+
+                const apt = fullInvEditApt;
+                const _raw = fullInvConfig[apt];
+                const ac = {
+                  ...defaultFullAptCfg, ..._raw,
+                  freeLines: Array.isArray(_raw?.freeLines) ? _raw.freeLines : [],
+                  includePositions: Array.isArray(_raw?.includePositions) ? _raw.includePositions : [],
+                };
+                const upd = (patch) => updateFullApt(apt, patch);
+                return (
+                  <div className="panel-body" style={{padding:'14px 16px'}}>
+                    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:14}}>
+                      <button className="btn-secondary" style={{padding:'4px 10px',fontSize:12}} onClick={()=>setFullInvEditApt(null)}>← Atpakaļ</button>
+                      <div style={{fontWeight:700,fontSize:11,color:'#1F4E79',textTransform:'uppercase',letterSpacing:'.5px'}}>Dz. {apt} — īrnieka rēķins</div>
+                      <label style={{marginLeft:'auto',display:'flex',alignItems:'center',gap:6,fontSize:12,cursor:'pointer'}}>
+                        <input type="checkbox" checked={ac.enabled} onChange={e=>upd({enabled:e.target.checked})} style={{accentColor:'#2E75B6'}}/> Ieslēgts
+                      </label>
+                    </div>
+
+                    {/* Saņēmējs */}
+                    <div style={{background:'#f5f8fc',borderRadius:7,padding:'10px 12px',marginBottom:12,border:'1px solid #e0eaf2'}}>
+                      <div style={{fontWeight:600,fontSize:11,color:'#1F4E79',marginBottom:8}}>Saņēmējs</div>
+                      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+                        <div>{lbl('Vārds')}<input value={ac.recipientName} onChange={e=>upd({recipientName:e.target.value})} style={inpSt} placeholder="Vārds Uzvārds"/></div>
+                        <div>{lbl('E-pasts')}<input type="email" value={ac.email} onChange={e=>upd({email:e.target.value})} style={inpSt} placeholder="epasts@piemers.lv"/></div>
+                      </div>
+                    </div>
+
+                    {/* Pozīcijas no komunālā rēķina */}
+                    <div style={{background:'#f5f8fc',borderRadius:7,padding:'10px 12px',marginBottom:12,border:'1px solid #e0eaf2'}}>
+                      <div style={{fontWeight:600,fontSize:11,color:'#1F4E79',marginBottom:8}}>Iekļaut no komunālā rēķina</div>
+                      <div style={{display:'flex',flexWrap:'wrap',gap:'4px 16px'}}>
+                        {pozicijas.filter(p=>p.on).map(p=>(
+                          <label key={p.id} style={{fontSize:12,display:'flex',alignItems:'center',gap:5,cursor:'pointer'}}>
+                            <input type="checkbox" checked={ac.includePositions.includes(p.id)}
+                              onChange={e=>upd({includePositions: e.target.checked ? [...ac.includePositions,p.id] : ac.includePositions.filter(x=>x!==p.id)})}
+                              style={{accentColor:'#2E75B6'}}/>
+                            {p.label}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Elektrība */}
+                    <div style={{background:'#f5f8fc',borderRadius:7,padding:'10px 12px',marginBottom:12,border:'1px solid #e0eaf2'}}>
+                      <label style={{display:'flex',alignItems:'center',gap:7,fontSize:12,fontWeight:600,color:'#1F4E79',cursor:'pointer',marginBottom:ac.elec?8:0}}>
+                        <input type="checkbox" checked={ac.elec} onChange={e=>upd({elec:e.target.checked})} style={{accentColor:'#2E75B6'}}/> Elektrība dzīvoklī
+                      </label>
+                      {ac.elec && (
+                        <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                          <div style={{flex:1,minWidth:90}}>{lbl('Iepriekš. (kWh)')}<input type="number" step="0.001" value={ac.elecPrev} onChange={e=>upd({elecPrev:e.target.value})} style={{...inpSt,textAlign:'right'}} placeholder="0.000"/></div>
+                          <div style={{flex:1,minWidth:90}}>{lbl('Pašreiz. (kWh)')}<input type="number" step="0.001" value={ac.elecCur} onChange={e=>upd({elecCur:e.target.value})} style={{...inpSt,textAlign:'right'}} placeholder="0.000"/></div>
+                          <div style={{flex:1,minWidth:80}}>{lbl('Summa (EUR)')}<input type="number" step="0.01" value={ac.elecAmount} onChange={e=>upd({elecAmount:e.target.value})} style={{...inpSt,textAlign:'right'}} placeholder="0.00"/></div>
+                          <div style={{width:72,flexShrink:0}}>{lbl('Patēriņš')}<div style={{padding:'4px 0',fontWeight:700,color:'#1F4E79',fontSize:12,textAlign:'right'}}>{Math.max(0,Math.round(((parseFloat(ac.elecCur)||0)-(parseFloat(ac.elecPrev)||0))*1000)/1000).toFixed(3)}</div></div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* NĪN nodoklis */}
+                    <div style={{background:'#f5f8fc',borderRadius:7,padding:'10px 12px',marginBottom:12,border:'1px solid #e0eaf2'}}>
+                      <label style={{display:'flex',alignItems:'center',gap:7,fontSize:12,fontWeight:600,color:'#1F4E79',cursor:'pointer',marginBottom:ac.nin?8:0}}>
+                        <input type="checkbox" checked={ac.nin} onChange={e=>upd({nin:e.target.checked})} style={{accentColor:'#2E75B6'}}/> NĪN nodoklis
+                      </label>
+                      {ac.nin && (
+                        <div style={{display:'flex',gap:8}}>
+                          <div style={{flex:2}}>{lbl('Nosaukums')}<input value={ac.ninLabel} onChange={e=>upd({ninLabel:e.target.value})} style={inpSt} placeholder="NĪN nodoklis"/></div>
+                          <div style={{flex:1}}>{lbl('Summa (EUR)')}<input type="number" step="0.01" value={ac.ninAmount} onChange={e=>upd({ninAmount:e.target.value})} style={{...inpSt,textAlign:'right'}} placeholder="0.00"/></div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Brīvās pozīcijas */}
+                    <div style={{background:'#f5f8fc',borderRadius:7,padding:'10px 12px',marginBottom:8,border:'1px solid #e0eaf2'}}>
+                      <div style={{fontWeight:600,fontSize:11,color:'#1F4E79',marginBottom:8}}>Brīvās pozīcijas</div>
+                      {ac.freeLines.map((l,i)=>{
+                        const summa = Math.round((parseFloat(l.daudz)||0)*(parseFloat(l.cena)||0)*100)/100;
+                        return (
+                          <div key={i} style={{display:'flex',gap:6,alignItems:'flex-end',marginBottom:5}}>
+                            <div style={{flex:2}}>{i===0&&lbl('Nosaukums')}<input value={l.nos} onChange={e=>upd({freeLines:ac.freeLines.map((r,j)=>j===i?{...r,nos:e.target.value}:r)})} style={inpSt} placeholder="Pozīcijas nosaukums"/></div>
+                            <div style={{width:80}}>{i===0&&lbl('Mērvien.')}<select value={l.mv} onChange={e=>upd({freeLines:ac.freeLines.map((r,j)=>j===i?{...r,mv:e.target.value}:r)})} style={{...inpSt,padding:'4px 2px'}}><option value="">—</option>{MV_OPTS.map(u=><option key={u} value={u}>{u}</option>)}</select></div>
+                            <div style={{width:80}}>{i===0&&lbl('Daudzums')}<input type="number" step="0.001" value={l.daudz} onChange={e=>upd({freeLines:ac.freeLines.map((r,j)=>j===i?{...r,daudz:e.target.value}:r)})} style={{...inpSt,textAlign:'right'}}/></div>
+                            <div style={{width:80}}>{i===0&&lbl('Cena (€)')}<input type="number" step="0.01" value={l.cena} onChange={e=>upd({freeLines:ac.freeLines.map((r,j)=>j===i?{...r,cena:e.target.value}:r)})} style={{...inpSt,textAlign:'right'}}/></div>
+                            <div style={{width:64,textAlign:'right'}}>{i===0&&lbl('Summa')}<div style={{padding:'4px 0',fontWeight:700,color:'#1F4E79',fontSize:12}}>{summa.toFixed(2)}</div></div>
+                            <button onClick={()=>upd({freeLines:ac.freeLines.filter((_,j)=>j!==i)})} style={{background:'none',border:'none',color:'#c0392b',fontSize:16,cursor:'pointer',paddingBottom:2}}>×</button>
+                          </div>
+                        );
+                      })}
+                      <button className="btn-secondary" style={{padding:'4px 10px',fontSize:12,marginTop:4}} onClick={()=>upd({freeLines:[...ac.freeLines,{...emptyFree}]})}>+ Pievienot rindu</button>
+                    </div>
+                  </div>
+                );
+              })()}
 
               <div style={{padding:"9px 20px",background:"var(--yellow-100)",borderTop:"1px solid var(--border)",
                 fontSize:11,color:"var(--yellow-600)",display:"flex",alignItems:"center",gap:7}}>
@@ -1913,7 +2972,7 @@ export default function App({ onBack }) {
                                       style={{padding:"4px 8px",border:`1px solid ${sel?"#c8dce8":"#E65100"}`,borderRadius:5,fontSize:12,
                                         background:sel?"#fff":"#FFF3E0",minWidth:120}}>
                                       <option value="">— izvēlieties —</option>
-                                      {Object.keys(config).map(cid=>(
+                                      {sortApts(Object.keys(config)).map(cid=>(
                                         <option key={cid} value={cid}>{cid}</option>
                                       ))}
                                     </select>
@@ -2133,7 +3192,7 @@ export default function App({ onBack }) {
                                       style={{padding:"4px 8px",border:`1px solid ${sel?"#c8dce8":"#E65100"}`,borderRadius:5,fontSize:12,
                                         background:sel?"#fff":"#FFF3E0",minWidth:120}}>
                                       <option value="">— izlaist —</option>
-                                      {Object.keys(config).map(cid=>(
+                                      {sortApts(Object.keys(config)).map(cid=>(
                                         <option key={cid} value={cid}>{cid}</option>
                                       ))}
                                     </select>
@@ -2412,6 +3471,24 @@ export default function App({ onBack }) {
                     </div>
                   </div>
 
+                  {(() => {
+                    const py = parseInt(men.year||0), pm = parseInt(men.monthNum||0);
+                    const ef = py && pm ? extraInvoices.filter(i=>i.period_year===py&&i.period_month===pm) : [];
+                    if (!ef.length) return null;
+                    return (
+                      <div style={{background:"#f0f6ff",border:"1px solid #c0d8f0",borderRadius:7,padding:"10px 14px",marginBottom:12}}>
+                        <div style={{fontSize:11,fontWeight:700,color:"#1F4E79",marginBottom:6}}>Papildu rēķini ({ef.length}) — tiks iekļauti ģenerēšanā</div>
+                        {ef.map(i=>(
+                          <div key={i.id} style={{fontSize:11,color:"#2c5f8a",display:'flex',gap:12,borderTop:"1px solid #d0e8f8",paddingTop:4,marginTop:4}}>
+                            <span style={{fontFamily:'monospace'}}>{i.invoice_nr||'(nr. tiks piešķirts)'}</span>
+                            <span>{i.owner}</span>
+                            <span style={{color:"#888"}}>dz. {(i.apts||[]).join(', ')}</span>
+                            <span style={{marginLeft:'auto',fontWeight:600}}>{parseFloat(i.total_eur).toFixed(2)} €</span>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
                   <div style={{fontSize:12,color:"#5a7a90",marginBottom:8}}>
                     Ģenerētais fails saturēs 4 lapas: <b>Skaitītāju rādījumi · Alokatoru aprēķins · Skaitītāju reģistrs · Dzīvokļu konfigurācija</b>
                   </div>
@@ -2440,7 +3517,7 @@ export default function App({ onBack }) {
                       {emailProgress.errors.map((e,i) => <div key={i} style={{fontSize:10.5,marginTop:2}}>{e}</div>)}
                       {emailProgress.noEmail.length > 0 && (
                         <div style={{fontSize:10.5,marginTop:3,color:"#888",borderTop:"1px solid #ddd",paddingTop:3}}>
-                          Nav epasta adreses: dz. {emailProgress.noEmail.join(', ')} — pievienot dzīvokļu konfigurācijā
+                          Nav e-pasta adreses: {emailProgress.noEmail.join(', ')} — pievienot E-pasta iestatījumos
                         </div>
                       )}
                     </div>
