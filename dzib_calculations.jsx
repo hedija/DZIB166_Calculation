@@ -336,7 +336,7 @@ function parseAlokatori(wb) {
 // ─── Excel builder ─────────────────────────────────────────────────────────
 function fmt(ws,f,r1,c1,r2,c2){ for(let r=r1;r<=r2;r++)for(let c=c1;c<=c2;c++){const a=XLSX.utils.encode_cell({r,c});if(ws[a]&&ws[a].t==="n")ws[a].z=f;}}
 
-function buildIrnieku(fullInvs) {
+function buildIrnieku(fullInvs, mutualData) {
   const wb = XLSX.utils.book_new();
   const now = new Date();
   const DAYS   = ["svētdiena","pirmdiena","otrdiena","trešdiena","ceturtdiena","piektdiena","sestdiena"];
@@ -443,6 +443,42 @@ function buildIrnieku(fullInvs) {
       }
     }
     XLSX.utils.book_append_sheet(wb, wsS, "Kopsavilkums");
+  }
+
+  // ── Savstarpējie norēķini sheet ────────────────────────────────────────────
+  if (mutualData && Array.isArray(mutualData.persons) && mutualData.persons.length > 0
+      && Array.isArray(mutualData.rows) && mutualData.rows.length > 0) {
+    const { persons, rows } = mutualData;
+    const totals = persons.map((_, pi) =>
+      Math.round(rows.reduce((s, r) => s + (parseFloat(r.amounts?.[pi]) || 0), 0) * 100) / 100
+    );
+    const hdr = ['Nosaukums', ...persons];
+    const dataRows = rows.map(r =>
+      [r.label || '', ...persons.map((_, pi) => {
+        const v = parseFloat(r.amounts?.[pi]);
+        return isNaN(v) ? '' : v;
+      })]
+    );
+    const totRow = ['Summa', ...totals];
+    const wsM = XLSX.utils.aoa_to_sheet([
+      [`SAVSTARPĒJIE NORĒĶINI`, ...Array(hdr.length - 1).fill('')],
+      hdr,
+      ...dataRows,
+      totRow,
+    ]);
+    wsM['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: hdr.length - 1 } }];
+    wsM['!cols'] = [{ wch: 36 }, ...persons.map(() => ({ wch: 14 }))];
+    const totRowIdx = 2 + dataRows.length;
+    for (let ri = 2; ri <= totRowIdx; ri++) {
+      const isTot = ri === totRowIdx;
+      for (let ci = 0; ci <= persons.length; ci++) {
+        const addr = XLSX.utils.encode_cell({ r: ri, c: ci });
+        if (!wsM[addr]) continue;
+        if (wsM[addr].t === 'n') wsM[addr].z = '0.00';
+        if (isTot) wsM[addr].s = { font: { bold: true } };
+      }
+    }
+    XLSX.utils.book_append_sheet(wb, wsM, 'Savstarpējie norēķini');
   }
 
   return wb;
@@ -1380,6 +1416,8 @@ export default function App({ onBack }) {
   const [extraForm,     setExtraForm]     = useState(null);
   const [fullInvConfig, setFullInvConfig] = useState({});
   const [fullInvEditApt,setFullInvEditApt]= useState(null);
+  const [mutualSettl,      setMutualSettl]      = useState({ persons: [], rows: [] });
+  const [issuedTenantInvs, setIssuedTenantInvs] = useState([]);
   // extraForm = null → list view; object → new/edit form
   // { periodMode:'settings'|'custom', customPeriod:'', owner:'', apts:[], lines:[{nos,mv,daudz,cena}] }
   const [pozicijas,   setPozicijas]   = useState(() => DEFAULT_POZICIJAS.map(p => ({...p, on: true})));
@@ -1454,10 +1492,33 @@ export default function App({ onBack }) {
           setFullInvConfig(safe);
         }
       });
+    // Savstarpējie norēķini
+    supabase.from('settings').select('value').eq('key', 'mutual_settlements').maybeSingle()
+      .then(({ data }) => {
+        if (data?.value && typeof data.value === 'object') {
+          setMutualSettl({
+            persons: Array.isArray(data.value.persons) ? data.value.persons : [],
+            rows:    Array.isArray(data.value.rows)    ? data.value.rows    : [],
+          });
+        }
+      });
     // Papildu rēķini
     supabase.from('extra_invoices').select('*').order('created_at', { ascending: false })
       .then(({ data }) => { if (data) setExtraInvoices(data); });
   }, []);
+
+  // Load issued tenant invoices when entering step 4 or period changes
+  useEffect(() => {
+    if (step !== 4) return;
+    const pYear  = parseInt(men.year     || 0);
+    const pMonth = parseInt(men.monthNum || 0);
+    if (!pYear || !pMonth) return;
+    supabase.from('issued_invoices').select('*')
+      .eq('period_year', pYear).eq('period_month', pMonth)
+      .then(({ data }) => {
+        setIssuedTenantInvs((data || []).filter(r => r.invoice_nr?.startsWith('S')));
+      });
+  }, [step, men.year, men.monthNum]);
 
   const saveMen = (newMen) => { saveMenDb(newMen); };
   const updateMen = (field, val) => {
@@ -1651,6 +1712,14 @@ export default function App({ onBack }) {
     supabase.from('settings').upsert({ key: 'full_invoice_config', value: cfg })
       .then(({ error }) => { if (error) console.error('saveFullInvConfig:', error); })
       .catch(e => console.error('saveFullInvConfig:', e));
+  };
+  const updateMutualSettl = (patch) => {
+    setMutualSettl(prev => {
+      const next = { ...prev, ...patch };
+      supabase.from('settings').upsert({ key: 'mutual_settlements', value: next })
+        .then(({ error }) => { if (error) console.error('saveMutualSettl:', error); });
+      return next;
+    });
   };
   const updateFullApt = (apt, patch) => {
     setFullInvConfig(prev => {
@@ -2089,7 +2158,7 @@ export default function App({ onBack }) {
 
     XLSX.writeFile(buildXlsx(atskaite,alokData,config,men,effCirkulTarif,pozicijas,company,footnotes,numberedExtras),`DZIB_Kopsavilkums_${yyyy}_${mm}.xlsx`,{cellStyles:true});
     if (fullInvsForXlsx.length) {
-      XLSX.writeFile(buildIrnieku(fullInvsForXlsx), `DZIB_Irnieki_${yyyy}_${mm}.xlsx`, {cellStyles:true});
+      XLSX.writeFile(buildIrnieku(fullInvsForXlsx, mutualSettl), `DZIB_Irnieki_${yyyy}_${mm}.xlsx`, {cellStyles:true});
     }
     setDone(true);
   };
@@ -2261,6 +2330,14 @@ export default function App({ onBack }) {
       await new Promise(r => setTimeout(r, 300));
     }
 
+    // Refresh issued tenant invoices so mutual settlements see fresh data
+    const pYr = parseInt(men.year || 0), pMo = parseInt(men.monthNum || 0);
+    if (pYr && pMo) {
+      const { data: refreshed } = await supabase.from('issued_invoices').select('*')
+        .eq('period_year', pYr).eq('period_month', pMo);
+      setIssuedTenantInvs((refreshed || []).filter(r => r.invoice_nr?.startsWith('S')));
+    }
+
     return true;
   };
 
@@ -2427,7 +2504,7 @@ export default function App({ onBack }) {
                   {id:'comp',  icon:'🏢', label:'Uzņēmuma rekvizīti'},
                   {id:'email', icon:'✉', label:'Epasta iestatījumi'},
                   {id:'extra', icon:'+', label:'Papildu rēķini'},
-                  {id:'full',  icon:'⊞', label:'Īrnieku rēķini'},
+                  {id:'full',   icon:'⊞', label:'Īrnieku rēķini'},
                 ].map(t => (
                   <button key={t.id}
                     className={`panel-tab${activePanel===t.id?' active':''}`}
@@ -3196,6 +3273,7 @@ export default function App({ onBack }) {
                 );
               })()}
 
+
               <div style={{padding:"9px 20px",background:"var(--yellow-100)",borderTop:"1px solid var(--border)",
                 fontSize:11,color:"var(--yellow-600)",display:"flex",alignItems:"center",gap:7}}>
                 <span>💾</span>
@@ -3877,6 +3955,164 @@ export default function App({ onBack }) {
                   )}
                 </div>
               </div>
+              {/* ── Savstarpējie norēķini ── */}
+              {(() => {
+                const { persons, rows } = mutualSettl;
+                const inpSt = {padding:'4px 6px',border:'1px solid #c8dce8',borderRadius:5,fontSize:12,background:'#fff',boxSizing:'border-box'};
+                const totals = persons.map((_, pi) =>
+                  Math.round(rows.reduce((s, r) => s + (parseFloat(r.amounts?.[pi]) || 0), 0) * 100) / 100
+                );
+                const emptyRow = () => ({ label:'', aptId:'', posIds:[], divideBy:'1', amounts: persons.map(()=>'') });
+                const addRow    = () => updateMutualSettl({ rows: [...rows, emptyRow()] });
+                const updRow    = (ri, patch) => updateMutualSettl({ rows: rows.map((r,i) => i===ri ? {...r,...patch} : r) });
+                const delRow    = (ri) => updateMutualSettl({ rows: rows.filter((_,i) => i!==ri) });
+                const addPerson = () => updateMutualSettl({
+                  persons: [...persons, ''],
+                  rows: rows.map(r => ({ ...r, amounts: [...(r.amounts||[]), ''] })),
+                });
+                const updPerson = (pi, val) => updateMutualSettl({ persons: persons.map((p,i) => i===pi ? val : p) });
+                const delPerson = (pi) => updateMutualSettl({
+                  persons: persons.filter((_,i) => i!==pi),
+                  rows: rows.map(r => ({ ...r, amounts: (r.amounts||[]).filter((_,i) => i!==pi) })),
+                });
+
+                return (
+                  <div className="card" style={{marginTop:12}}>
+                    <div className="card-hdr">
+                      <div>
+                        <div className="card-title">Savstarpējie norēķini</div>
+                        <div className="card-meta">
+                          {issuedTenantInvs.length > 0
+                            ? `${issuedTenantInvs.length} īrnieku rēķini ielādēti`
+                            : 'Ģenerējiet PDF rēķinus, lai avotā parādās dzīvokļu pozīcijas'}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="card-body">
+                      {/* Personas */}
+                      <div style={{marginBottom:14}}>
+                        <div style={{fontWeight:600,fontSize:11,color:'#555',marginBottom:6}}>Personas (kolonnas)</div>
+                        <div style={{display:'flex',flexWrap:'wrap',gap:6,alignItems:'center'}}>
+                          {persons.map((p, pi) => (
+                            <div key={pi} style={{display:'flex',alignItems:'center',gap:4,background:'#eaf3fb',borderRadius:5,padding:'3px 8px',border:'1px solid #c0d8ee'}}>
+                              <input value={p} onChange={e=>updPerson(pi,e.target.value)}
+                                style={{border:'none',background:'transparent',fontSize:12,width:90,color:'#1F4E79',outline:'none'}}
+                                placeholder={`Persona ${pi+1}`}/>
+                              <button onClick={()=>delPerson(pi)} style={{background:'none',border:'none',color:'#c0392b',cursor:'pointer',fontSize:14,padding:'0 2px',lineHeight:1}}>×</button>
+                            </div>
+                          ))}
+                          <button className="btn-secondary" style={{padding:'4px 10px',fontSize:12}} onClick={addPerson}>+ Persona</button>
+                        </div>
+                      </div>
+
+                      {/* Darījumi */}
+                      {persons.length > 0 && (
+                        <div>
+                          {rows.map((row, ri) => {
+                            const aptInv   = issuedTenantInvs.find(inv => String(inv.apt) === String(row.aptId));
+                            const aptLines = aptInv?.lines || [];
+                            const selIds   = Array.isArray(row.posIds) ? row.posIds : [];
+                            const selSum   = Math.round(aptLines.filter(l => selIds.includes(l.nos)).reduce((s,l) => s+(parseFloat(l.summa)||0), 0) * 100) / 100;
+                            const divN     = Math.max(1, parseInt(row.divideBy)||1);
+                            const refAmt   = row.aptId && selIds.length > 0 ? Math.round(selSum / divN * 100) / 100 : null;
+                            return (
+                              <div key={ri} style={{border:'1px solid #e0eaf2',borderRadius:7,padding:'9px 11px',marginBottom:7,background:ri%2===0?'#fff':'#f9fafe'}}>
+                                {/* Row header: label + apt selector + delete */}
+                                <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:7,flexWrap:'wrap'}}>
+                                  <input value={row.label||''} onChange={e=>updRow(ri,{label:e.target.value})}
+                                    style={{...inpSt,flex:'2 1 150px'}} placeholder="Darījuma nosaukums"/>
+                                  <select value={row.aptId||''} onChange={e=>updRow(ri,{aptId:e.target.value,posIds:[],divideBy:'1'})}
+                                    style={{...inpSt,flex:'1 1 160px',padding:'4px 2px'}}>
+                                    <option value="">— Manuāli —</option>
+                                    {issuedTenantInvs.map(inv => (
+                                      <option key={inv.apt} value={String(inv.apt)}>dz. {inv.apt} — {inv.owner}</option>
+                                    ))}
+                                  </select>
+                                  <button onClick={()=>delRow(ri)} style={{background:'none',border:'none',color:'#c0392b',fontSize:15,cursor:'pointer',lineHeight:1,padding:'2px 4px',marginLeft:'auto'}}>×</button>
+                                </div>
+
+                                {/* Position checkboxes for selected apartment */}
+                                {row.aptId && (
+                                  <div style={{background:'#f5f8fc',borderRadius:6,padding:'8px 10px',marginBottom:8,border:'1px solid #e0eaf2'}}>
+                                    {aptLines.length === 0
+                                      ? <div style={{fontSize:11,color:'#aaa'}}>Nav pozīciju šajā rēķinā.</div>
+                                      : aptLines.map((l, li) => {
+                                          const checked = selIds.includes(l.nos);
+                                          return (
+                                            <label key={li} style={{display:'flex',alignItems:'center',gap:8,padding:'3px 0',cursor:'pointer',fontSize:12,borderBottom:li<aptLines.length-1?'1px solid #edf1f7':'none'}}>
+                                              <input type="checkbox" checked={checked}
+                                                onChange={e => {
+                                                  const next = e.target.checked ? [...selIds, l.nos] : selIds.filter(n => n!==l.nos);
+                                                  updRow(ri, {posIds: next});
+                                                }}
+                                                style={{accentColor:'#2E75B6',width:14,height:14,flexShrink:0}}/>
+                                              <span style={{flex:1,color:checked?'#1F4E79':'#555'}}>{l.nos}</span>
+                                              <span style={{fontFamily:'monospace',fontSize:11,color:checked?'#1F4E79':'#888',fontWeight:checked?700:400}}>{(parseFloat(l.summa)||0).toFixed(2)} €</span>
+                                            </label>
+                                          );
+                                        })
+                                    }
+                                    {selIds.length > 0 && (
+                                      <div style={{marginTop:7,paddingTop:6,borderTop:'1px solid #dde4ee',display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                                        <span style={{fontSize:11,color:'#555',flex:1}}>
+                                          Atlasīts: <b style={{color:'#1F4E79'}}>{selSum.toFixed(2)} €</b>
+                                        </span>
+                                        <span style={{fontSize:11,color:'#666'}}>÷</span>
+                                        <input type="number" min="1" step="1" value={row.divideBy??'1'}
+                                          onChange={e=>updRow(ri,{divideBy:e.target.value})}
+                                          style={{...inpSt,width:44,textAlign:'center'}}/>
+                                        {divN > 1 && refAmt !== null && (
+                                          <span style={{fontSize:11,color:'#2E75B6',fontWeight:700,whiteSpace:'nowrap'}}>= {refAmt.toFixed(2)} €</span>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+                                {/* Per-person amounts */}
+                                <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+                                  {persons.map((p, pi) => (
+                                    <div key={pi} style={{display:'flex',flexDirection:'column',minWidth:90,flex:'1 1 90px'}}>
+                                      <div style={{fontSize:10,color:'#888',marginBottom:2}}>{p||`P${pi+1}`}</div>
+                                      <input type="number" step="0.01"
+                                        value={row.amounts?.[pi]??''}
+                                        onChange={e=>{
+                                          const amts=[...(row.amounts||persons.map(()=>''))];
+                                          amts[pi]=e.target.value;
+                                          updRow(ri,{amounts:amts});
+                                        }}
+                                        style={{...inpSt,textAlign:'right',
+                                          color:parseFloat(row.amounts?.[pi])>0?'#1a7a1a':parseFloat(row.amounts?.[pi])<0?'#c0392b':'inherit'}}/>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })}
+
+                          {/* Column totals */}
+                          {rows.length > 0 && (
+                            <div style={{display:'flex',gap:6,flexWrap:'wrap',padding:'8px 11px',background:'#eaf3fb',borderRadius:6,border:'1px solid #c0d8ee',marginBottom:6}}>
+                              <div style={{flex:'2 1 150px',fontSize:12,fontWeight:700}}>Summa</div>
+                              {totals.map((t, pi) => (
+                                <div key={pi} style={{minWidth:90,flex:'1 1 90px',fontSize:12,fontWeight:700,textAlign:'right',
+                                  color:t>0?'#1a7a1a':t<0?'#c0392b':'#555'}}>
+                                  <span style={{color:'#888',fontWeight:400,fontSize:10,marginRight:4}}>{persons[pi]}</span>{t.toFixed(2)}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      <button className="btn-secondary" style={{padding:'5px 12px',fontSize:12,marginTop:4}}
+                        onClick={addRow} disabled={persons.length===0}>+ Pievienot darījumu</button>
+                      {persons.length===0 && <div style={{fontSize:11,color:'#888',marginTop:6}}>Vispirms pievienojiet personas (kolonnas).</div>}
+                    </div>
+                  </div>
+                );
+              })()}
+
               <StepFooter step={4} onBack={()=>setStep(3)} onNext={null} noNext/>
             </>
           )}
