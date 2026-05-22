@@ -264,11 +264,10 @@ body {
 
 /* ─── Panel tabs (Step 0 settings panels) ───────────────────────────────── */
 .panel-tabs {
-  display: flex; gap: 2px;
-  padding: 0 20px;
+  display: flex; gap: 2px; flex-wrap: wrap;
+  padding: 4px 20px 0;
   border-top: 1px solid var(--border);
   background: var(--surface);
-  overflow-x: auto;
 }
 .panel-tab {
   display: inline-flex; align-items: center; gap: 6px;
