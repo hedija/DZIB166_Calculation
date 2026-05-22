@@ -122,9 +122,6 @@ function InvoicePage({ block, logo }) {
           <Text style={[s.th, s.colC,  { textAlign: 'right'  }]}>Cena (EUR)</Text>
           <Text style={[s.th, s.colS,  { textAlign: 'right'  }]}>Summa (EUR)</Text>
         </View>
-        <View style={s.row}>
-          <Text style={s.grpCell}>Komunālie pakalpojumi un apsaimniekošana</Text>
-        </View>
         {lines.map((l, i) => (
           <View key={i} style={[s.row, i % 2 !== 0 && { backgroundColor: '#f9f9f9' }]}>
             <Text style={[s.td, s.colNos]}>{l.nos}</Text>
