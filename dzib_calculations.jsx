@@ -49,6 +49,47 @@ async function ensureXLSX() {
   if (!XLSX) XLSX = await import('xlsx-js-style');
 }
 
+// ─── IndexedDB helpers for FileSystemDirectoryHandle persistence ─────────────
+const _IDB_NAME = 'dzib166-fs', _IDB_STORE = 'handles';
+function _openIDB() {
+  return new Promise((res, rej) => {
+    const req = indexedDB.open(_IDB_NAME, 1);
+    req.onupgradeneeded = e => e.target.result.createObjectStore(_IDB_STORE);
+    req.onsuccess = e => res(e.target.result);
+    req.onerror   = e => rej(e.target.error);
+  });
+}
+async function _getFolderHandle(key) {
+  try {
+    const db = await _openIDB();
+    return new Promise((res, rej) => {
+      const req = db.transaction(_IDB_STORE, 'readonly').objectStore(_IDB_STORE).get(key);
+      req.onsuccess = e => res(e.target.result || null);
+      req.onerror   = e => rej(e.target.error);
+    });
+  } catch { return null; }
+}
+async function _setFolderHandle(key, handle) {
+  try {
+    const db = await _openIDB();
+    await new Promise((res, rej) => {
+      const req = db.transaction(_IDB_STORE, 'readwrite').objectStore(_IDB_STORE).put(handle, key);
+      req.onsuccess = () => res();
+      req.onerror   = e => rej(e.target.error);
+    });
+  } catch { }
+}
+async function _deleteFolderHandle(key) {
+  try {
+    const db = await _openIDB();
+    await new Promise(res => {
+      const tx = db.transaction(_IDB_STORE, 'readwrite');
+      tx.objectStore(_IDB_STORE).delete(key);
+      tx.oncomplete = res;
+    });
+  } catch { }
+}
+
 // ─── DB helpers ────────────────────────────────────────────────────────────
 async function saveCfgDb(config) {
   try {
@@ -1418,6 +1459,8 @@ export default function App({ onBack }) {
   const [fullInvEditApt,setFullInvEditApt]= useState(null);
   const [mutualSettl,      setMutualSettl]      = useState({ persons: [], rows: [] });
   const [issuedTenantInvs, setIssuedTenantInvs] = useState([]);
+  const [pdfFolderRegular, setPdfFolderRegular] = useState(null); // FileSystemDirectoryHandle
+  const [pdfFolderTenant,  setPdfFolderTenant]  = useState(null); // FileSystemDirectoryHandle
   // extraForm = null → list view; object → new/edit form
   // { periodMode:'settings'|'custom', customPeriod:'', owner:'', apts:[], lines:[{nos,mv,daudz,cena}] }
   const [pozicijas,   setPozicijas]   = useState(() => DEFAULT_POZICIJAS.map(p => ({...p, on: true})));
@@ -1505,6 +1548,9 @@ export default function App({ onBack }) {
     // Papildu rēķini
     supabase.from('extra_invoices').select('*').order('created_at', { ascending: false })
       .then(({ data }) => { if (data) setExtraInvoices(data); });
+    // PDF mapes (IndexedDB)
+    _getFolderHandle('pdfFolder_regular').then(h => { if (h) setPdfFolderRegular(h); });
+    _getFolderHandle('pdfFolder_tenant').then(h  => { if (h) setPdfFolderTenant(h); });
   }, []);
 
   // Load issued tenant invoices when entering step 4 or period changes
@@ -1721,6 +1767,45 @@ export default function App({ onBack }) {
       return next;
     });
   };
+
+  const choosePdfFolder = async (type) => {
+    if (!window.showDirectoryPicker) {
+      alert('Šī pārlūkprogramma neatbalsta mapes izvēli. Lūdzu, izmantojiet Chrome vai Edge.');
+      return;
+    }
+    try {
+      const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+      await _setFolderHandle(`pdfFolder_${type}`, handle);
+      if (type === 'regular') setPdfFolderRegular(handle);
+      else setPdfFolderTenant(handle);
+    } catch(e) {
+      if (e.name !== 'AbortError') console.error('choosePdfFolder:', e);
+    }
+  };
+  const clearPdfFolder = async (type) => {
+    await _deleteFolderHandle(`pdfFolder_${type}`);
+    if (type === 'regular') setPdfFolderRegular(null);
+    else setPdfFolderTenant(null);
+  };
+  const savePdfBlob = async (blob, filename, folderHandle) => {
+    if (folderHandle) {
+      try {
+        const perm = await folderHandle.requestPermission({ mode: 'readwrite' });
+        if (perm === 'granted') {
+          const fh = await folderHandle.getFileHandle(filename, { create: true });
+          const writable = await fh.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          return;
+        }
+      } catch(e) { console.warn('savePdfBlob: folder write failed, falling back to download', e); }
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
   const updateFullApt = (apt, patch) => {
     setFullInvConfig(prev => {
       const merged = { ...defaultFullAptCfg, ...prev[apt], ...patch };
@@ -1824,10 +1909,7 @@ export default function App({ onBack }) {
     const { logo, block } = await _buildExtraBlock(inv);
     const el = React.createElement(InvoiceDoc, { blocks: [block], logo });
     const pdfBlob = await pdfLib.pdf(el).toBlob();
-    const url = URL.createObjectURL(pdfBlob);
-    const a = document.createElement('a'); a.href = url;
-    a.download = `Rekins_${inv.invoice_nr}.pdf`; a.click();
-    URL.revokeObjectURL(url);
+    await savePdfBlob(pdfBlob, `Rekins_${inv.invoice_nr}.pdf`, pdfFolderRegular);
   };
 
   const handleExtraEmail = async (inv) => {
@@ -2198,14 +2280,7 @@ export default function App({ onBack }) {
       try {
         const el = React.createElement(InvoiceDoc, { blocks: [block], logo });
         const blob = await pdfLib.pdf(el).toBlob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `Rekins_${block.invoiceNr}-${block.aptDz}.pdf`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        await savePdfBlob(blob, `Rekins_${block.invoiceNr}-${block.aptDz}.pdf`, pdfFolderRegular);
       } catch(e) {
         setErrPdf(`${block.aptDz}: ${e.message}`);
         return false;
@@ -2248,14 +2323,7 @@ export default function App({ onBack }) {
         const { logo: eLogo, block: eBlock } = await _buildExtraBlock(invWithNr);
         const el = React.createElement(InvoiceDoc, { blocks: [eBlock], logo: eLogo });
         const blob = await pdfLib.pdf(el).toBlob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `Rekins_${newNr}.pdf`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        await savePdfBlob(blob, `Rekins_${newNr}.pdf`, pdfFolderRegular);
         await supabase.from('extra_invoices').update({ invoice_nr: newNr }).eq('id', inv.id);
         await supabase.from('issued_invoices').upsert({
           invoice_nr:   newNr,
@@ -2291,11 +2359,7 @@ export default function App({ onBack }) {
     const downloadPdf = async (block, filename) => {
       const el = React.createElement(InvoiceDoc, { blocks: [block], logo });
       const blob = await pdfLib.pdf(el).toBlob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = filename;
-      document.body.appendChild(a); a.click(); document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      await savePdfBlob(blob, filename, pdfFolderTenant);
     };
 
     for (let fi = 0; fi < tenantApts.length; fi++) {
@@ -2893,6 +2957,41 @@ export default function App({ onBack }) {
                         </div>
                       </div>
                     </div>
+                  </div>
+
+                  {/* PDF mapes */}
+                  <div style={{marginTop:18,borderTop:"1px solid #e8f0f8",paddingTop:14}}>
+                    <div style={{fontWeight:600,fontSize:11,color:"#7a9ab5",textTransform:"uppercase",letterSpacing:".4px",marginBottom:8}}>PDF saglabāšanas mapes</div>
+                    <div style={{fontSize:11,color:"#888",marginBottom:10}}>
+                      Norādiet mapes, kurās automātiski tiks saglabāti ģenerētie PDF faili (Chrome/Edge).
+                      Ja mape nav norādīta, faili tiks lejupielādēti pārlūkprogrammas standarta veidā.
+                    </div>
+                    {[
+                      { type:'regular', label:'Īpašnieku rēķini', handle: pdfFolderRegular },
+                      { type:'tenant',  label:'Īrnieku rēķini',   handle: pdfFolderTenant  },
+                    ].map(({ type, label, handle }) => (
+                      <div key={type} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0",borderBottom:"1px solid #f0f4f8"}}>
+                        <div style={{flex:"0 0 160px",fontSize:12,color:"#1a2733",fontWeight:500}}>{label}</div>
+                        <div style={{flex:1,display:"flex",alignItems:"center",gap:6}}>
+                          {handle
+                            ? <span style={{fontSize:11,color:"#2e7d32",background:"#e8f5e9",border:"1px solid #a5d6a7",borderRadius:3,padding:"2px 8px",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                                {handle.name}
+                              </span>
+                            : <span style={{fontSize:11,color:"#aaa",flex:1}}>Nav norādīta</span>
+                          }
+                          <button style={{cursor:"pointer",background:"#e8f0fe",color:"#1a73e8",border:"1px solid #c5d8f7",borderRadius:4,padding:"3px 10px",fontSize:11,fontWeight:500,whiteSpace:"nowrap"}}
+                            onClick={()=>choosePdfFolder(type)}>
+                            Izvēlēties mapi
+                          </button>
+                          {handle && (
+                            <button style={{cursor:"pointer",background:"none",border:"none",color:"#c00",fontSize:11,padding:"2px 6px"}}
+                              onClick={()=>clearPdfFolder(type)}>
+                              Noņemt
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
