@@ -21,26 +21,27 @@ const sortApts = arr => [...arr].sort((a, b) => {
   return ta !== tb ? ta - tb : na !== nb ? na - nb : sa < sb ? -1 : sa > sb ? 1 : 0;
 });
 
-let _fontsRegistered = false;
-async function ensureFonts(pdfLib) {
-  if (_fontsRegistered) return;
-  const toDataUrl = async (url) => {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Font ${url}: ${res.status} ${res.statusText}`);
-    const blob = await res.blob();
-    return new Promise(resolve => { const r = new FileReader(); r.onloadend = () => resolve(r.result); r.readAsDataURL(blob); });
-  };
-  const [reg, bold, ital] = await Promise.all([
-    toDataUrl(_fontRegularUrl),
-    toDataUrl(_fontBoldUrl),
-    toDataUrl(_fontItalicUrl),
-  ]);
-  pdfLib.Font.register({ family: 'Roboto', fonts: [
-    { src: reg,  fontWeight: 'normal', fontStyle: 'normal' },
-    { src: bold, fontWeight: 'bold',   fontStyle: 'normal' },
-    { src: ital, fontWeight: 'normal', fontStyle: 'italic' },
-  ]});
-  _fontsRegistered = true;
+let _fontsPromise = null;
+function ensureFonts(pdfLib) {
+  if (_fontsPromise) return _fontsPromise;
+  _fontsPromise = (async () => {
+    const toDataUrl = async (url) => {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Font ${url}: ${res.status} ${res.statusText}`);
+      return blobToDataUrl(await res.blob());
+    };
+    const [reg, bold, ital] = await Promise.all([
+      toDataUrl(_fontRegularUrl),
+      toDataUrl(_fontBoldUrl),
+      toDataUrl(_fontItalicUrl),
+    ]);
+    pdfLib.Font.register({ family: 'Roboto', fonts: [
+      { src: reg,  fontWeight: 'normal', fontStyle: 'normal' },
+      { src: bold, fontWeight: 'bold',   fontStyle: 'normal' },
+      { src: ital, fontWeight: 'normal', fontStyle: 'italic' },
+    ]});
+  })();
+  return _fontsPromise;
 }
 
 // xlsx-js-style is ~800 kB — load it lazily on first use so the initial bundle stays small
@@ -90,25 +91,40 @@ async function _deleteFolderHandle(key) {
   } catch { }
 }
 
+function blobToDataUrl(blob) {
+  return new Promise(res => { const r = new FileReader(); r.onloadend = () => res(r.result); r.readAsDataURL(blob); });
+}
+function blobToBase64(blob) {
+  return blobToDataUrl(blob).then(d => d.split(',')[1]);
+}
+
 // ─── DB helpers ────────────────────────────────────────────────────────────
+function _aptToRow(dz, c) {
+  return {
+    apt:          dz,
+    owner:        c.owner         || '',
+    area:         c.area          || 0,
+    heated_area:  c.heatedArea    || 0,
+    residents:    c.residents     || 0,
+    email:        c.email         || '',
+    circ_group:   c.circGroup     || 0,
+    pay_day:      c.payDay        || 20,
+    pos_disabled:       c.posDisabled       || [],
+    pos_extra:          c.posExtra          || [],
+    footnotes_disabled: c.footnotesDisabled || [],
+  };
+}
 async function saveCfgDb(config) {
   try {
-    const rows = Object.entries(config).map(([dz, c]) => ({
-      apt:          dz,
-      owner:        c.owner         || '',
-      area:         c.area          || 0,
-      heated_area:  c.heatedArea    || 0,
-      residents:    c.residents     || 0,
-      email:        c.email         || '',
-      circ_group:   c.circGroup     || 0,
-      pay_day:      c.payDay        || 20,
-      pos_disabled:       c.posDisabled       || [],
-      pos_extra:          c.posExtra          || [],
-      footnotes_disabled: c.footnotesDisabled || [],
-    }));
+    const rows = Object.entries(config).map(([dz, c]) => _aptToRow(dz, c));
     if (rows.length)
       await supabase.from('apartment_config').upsert(rows, { onConflict: 'apt' });
   } catch(e) { console.error('saveCfgDb:', e); }
+}
+async function saveAptDb(dz, cfg) {
+  try {
+    await supabase.from('apartment_config').upsert(_aptToRow(dz, cfg), { onConflict: 'apt' });
+  } catch(e) { console.error('saveAptDb:', e); }
 }
 
 async function savePozDb(poz) {
@@ -131,7 +147,7 @@ async function resolveLogo(company) {
     const resp = await fetch('/' + company.logoPath);
     if (!resp.ok) return null;
     const blob = await resp.blob();
-    return await new Promise(res => { const r = new FileReader(); r.onloadend = () => res(r.result); r.readAsDataURL(blob); });
+    return blobToDataUrl(blob);
   } catch { return null; }
 }
 
@@ -377,6 +393,62 @@ function parseAlokatori(wb) {
 // ─── Excel builder ─────────────────────────────────────────────────────────
 function fmt(ws,f,r1,c1,r2,c2){ for(let r=r1;r<=r2;r++)for(let c=c1;c<=c2;c++){const a=XLSX.utils.encode_cell({r,c});if(ws[a]&&ws[a].t==="n")ws[a].z=f;}}
 
+// Builds invoice lines for one apartment as objects {nos,mv,daudz,cena,summa}.
+// tariffs must include: tAU, tKU, tApsam, tRem, tSiltmez, tKoplEl,
+//                       cirkulTarif, lietusMen, atkritumiPerPers
+// Returns { lines, rAU, rKU, rAtk, rKoplEl, rApkM2, rApkAlok }
+function computeAptLines(apt, cfg, tariffs, pozicijas, men) {
+  const { tAU, tKU, tApsam, tRem, tSiltmez, tKoplEl, cirkulTarif, lietusMen, atkritumiPerPers } = tariffs;
+  const cirkulGrupas = parseFloat(cfg.circGroup) || 0;
+  const rApsam   = Math.round(apt.area * tApsam   * 100) / 100;
+  const rRem     = Math.round(apt.area * tRem     * 100) / 100;
+  const rSiltmez = Math.round(apt.area * tSiltmez * 100) / 100;
+  const rCirk    = Math.round(cirkulGrupas * (cirkulTarif || 0) * 100) / 100;
+  const rApkM2   = Math.round(apt.maksPlatibaiArPVN * 100) / 100;
+  const rApkAlok = Math.round(apt.maksVienibamArPVN * 100) / 100;
+  const rKoplEl  = Math.round(tKoplEl * 100) / 100;
+  const rAtk     = Math.round(atkritumiPerPers * (apt.residents || 0) * 100) / 100;
+
+  const auLines = apt.coldMeters.map(m => ({
+    nos: `Aukstā ūdens skaitītājs (${m.prev.toFixed(3)}–${m.cur.toFixed(3)})`,
+    mv: "m³", daudz: m.pat, cena: tAU, summa: Math.round(m.pat * tAU * 100) / 100,
+  }));
+  const kuLines = apt.hotMeters.map(m => ({
+    nos: `Karstā ūdens skaitītājs (${m.prev.toFixed(3)}–${m.cur.toFixed(3)})`,
+    mv: "m³", daudz: m.pat, cena: tKU, summa: Math.round(m.pat * tKU * 100) / 100,
+  }));
+  const rAU = auLines.reduce((s, l) => s + l.summa, 0);
+  const rKU = kuLines.reduce((s, l) => s + l.summa, 0);
+
+  const effPoz  = (pozicijas && pozicijas.length) ? pozicijas : DEFAULT_POZICIJAS.map(p => ({...p, on: true}));
+  const dzOff   = new Set(cfg.posDisabled || []);
+  const dzExtra = cfg.posExtra || [];
+  const lines      = [];
+  const posAmounts = {};
+
+  for (const poz of effPoz) {
+    if (!poz.on || dzOff.has(poz.id)) { posAmounts[poz.id] = 0; continue; }
+    switch (poz.id) {
+      case "audensU": posAmounts[poz.id] = rAU;      lines.push(...auLines); break;
+      case "kudensU": posAmounts[poz.id] = rKU;      lines.push(...kuLines); break;
+      case "cirk":    posAmounts[poz.id] = rCirk;    if (cirkulGrupas > 0) lines.push({ nos: "Cirkulācija*",                mv: poz.mv, daudz: cirkulGrupas,      cena: cirkulTarif || 0, summa: rCirk    }); break;
+      case "lietus":  posAmounts[poz.id] = lietusMen; lines.push(           { nos: "Lietus notekūdeņi",          mv: poz.mv, daudz: 1,                  cena: lietusMen,        summa: lietusMen }); break;
+      case "atk":     posAmounts[poz.id] = rAtk;     if (rAtk > 0) lines.push({ nos: "Atkritumu izvešana**",       mv: poz.mv, daudz: apt.residents || 0, cena: atkritumiPerPers, summa: rAtk     }); break;
+      case "koplEl":  posAmounts[poz.id] = rKoplEl;  lines.push(            { nos: "Koplietošanas elektrība***", mv: poz.mv, daudz: 1,                  cena: tKoplEl,          summa: rKoplEl  }); break;
+      case "apsam":   posAmounts[poz.id] = rApsam;   lines.push(            { nos: "Apsaimniekošana",            mv: poz.mv, daudz: apt.area,           cena: tApsam,           summa: rApsam   }); break;
+      case "rem":     posAmounts[poz.id] = rRem;     lines.push(            { nos: "Remontdarbu fonds",          mv: poz.mv, daudz: apt.area,           cena: tRem,             summa: rRem     }); break;
+      case "siltmez": posAmounts[poz.id] = rSiltmez; if (rSiltmez > 0) lines.push({ nos: "Siltummezgla apkalpošana",   mv: poz.mv, daudz: apt.area,           cena: tSiltmez,         summa: rSiltmez }); break;
+      case "apkM2":   posAmounts[poz.id] = men.heatingIncluded ? rApkM2   : 0; if (men.heatingIncluded && rApkM2   > 0) lines.push({ nos: `Apkure (kopējā) ${men.heatingM2Pct || "40"}%`,      mv: poz.mv, daudz: apt.heatedArea,   cena: apt.cenaM2ArPVN,   summa: rApkM2   }); break;
+      case "apkAlok": posAmounts[poz.id] = men.heatingIncluded ? rApkAlok : 0; if (men.heatingIncluded && rApkAlok > 0) lines.push({ nos: `Apkure (patēriņš) ${men.heatingAllocPct || "60"}%`, mv: poz.mv, daudz: apt.alokVienibas, cena: apt.cenaVienArPVN, summa: rApkAlok }); break;
+    }
+  }
+  for (const ex of dzExtra) {
+    const s = parseFloat(ex.summa) || 0;
+    if (ex.label && s !== 0) lines.push({ nos: ex.label, mv: "€/dz.", daudz: 1, cena: s, summa: s });
+  }
+  return { lines, rAU, rKU, rAtk, rKoplEl, rApkM2, rApkAlok, posAmounts };
+}
+
 function buildIrnieku(fullInvs, mutualData) {
   const wb = XLSX.utils.book_new();
   const now = new Date();
@@ -599,10 +671,9 @@ function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, comp
     const lietusMen = Math.round(tLietus / 12 * 100) / 100;
 
     const _now = new Date();
-    const _MNES = MNES;
     const gadam     = String(men.year     || _now.getFullYear());
     const mesCipars = String(men.monthNum || (_now.getMonth() + 1)).padStart(2, "0");
-    const mesVards  = men.monthName       || _MNES[_now.getMonth()];
+    const mesVards  = men.monthName       || MNES[_now.getMonth()];
     const _curMes   = parseInt(mesCipars) || 1;
     const _curYear  = parseInt(gadam);
     const _nextMes  = _curMes === 12 ? 1 : _curMes + 1;
@@ -612,10 +683,12 @@ function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, comp
     const _prevMes   = _curMes === 1 ? 12 : _curMes - 1;
     const _prevYear  = _curMes === 1 ? _curYear - 1 : _curYear;
     const periodTxt  = `${gadam}. gada ${mesVards}`;
-    const period1Txt = `${String(_prevYear)}. gada ${_MNES[_prevMes - 1]}`;
+    const period1Txt = `${String(_prevYear)}. gada ${MNES[_prevMes - 1]}`;
 
     const atkritumiKopa = parseFloat(men.waste) || 0;
     const totalPersonas = merged.reduce((s, a) => s + (a.residents || 0), 0);
+    const _atkritumiPerPers = totalPersonas > 0 ? Math.round(atkritumiKopa / totalPersonas * 10000) / 10000 : 0;
+    const tariffs = { tAU, tKU, tApsam, tRem, tSiltmez, tKoplEl, cirkulTarif, lietusMen, atkritumiPerPers: _atkritumiPerPers };
 
     const now = new Date();
     const DAYS_LV   = ["svētdiena","pirmdiena","otrdiena","trešdiena","ceturtdiena","piektdiena","sestdiena"];
@@ -739,33 +812,13 @@ function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, comp
     {
       const effPoz6 = (pozicijas && pozicijas.length) ? pozicijas : DEFAULT_POZICIJAS.map(p=>({...p,on:true}));
       const activePoz6 = effPoz6.filter(p => p.on);
-      const kAtriPerPers6 = totalPersonas > 0 ? Math.round(atkritumiKopa / totalPersonas * 10000) / 10000 : 0;
 
       const aptAmts = merged.map(apt => {
         const cfg = config[apt.dz] || {};
-        const dzOff = new Set(cfg.posDisabled || []);
-        const cirkulGrupas = parseFloat(cfg.circGroup) || 0;
-        const amtMap = {};
-        for (const poz of activePoz6) {
-          if (dzOff.has(poz.id)) { amtMap[poz.id] = 0; continue; }
-          switch (poz.id) {
-            case 'audensU':  amtMap[poz.id] = Math.round(apt.auKopa * tAU * 100) / 100; break;
-            case 'kudensU':  amtMap[poz.id] = Math.round(apt.kuKopa * tKU * 100) / 100; break;
-            case 'cirk':     amtMap[poz.id] = cirkulGrupas > 0 ? Math.round(cirkulGrupas * (cirkulTarif||0) * 100) / 100 : 0; break;
-            case 'lietus':   amtMap[poz.id] = lietusMen; break;
-            case 'atk':      amtMap[poz.id] = Math.round(kAtriPerPers6 * (apt.residents||0) * 100) / 100; break;
-            case 'koplEl':   amtMap[poz.id] = Math.round(tKoplEl * 100) / 100; break;
-            case 'apsam':    amtMap[poz.id] = Math.round(apt.area * tApsam * 100) / 100; break;
-            case 'rem':      amtMap[poz.id] = Math.round(apt.area * tRem * 100) / 100; break;
-            case 'siltmez':  amtMap[poz.id] = Math.round(apt.area * tSiltmez * 100) / 100; break;
-            case 'apkM2':    amtMap[poz.id] = men.heatingIncluded ? Math.round(apt.maksPlatibaiArPVN * 100) / 100 : 0; break;
-            case 'apkAlok':  amtMap[poz.id] = men.heatingIncluded ? Math.round(apt.maksVienibamArPVN * 100) / 100 : 0; break;
-            default:         amtMap[poz.id] = 0;
-          }
-        }
+        const { posAmounts, lines: aptLines } = computeAptLines(apt, cfg, tariffs, pozicijas, men);
         const extras = Math.round((cfg.posExtra || []).reduce((s, ex) => s + (parseFloat(ex.summa) || 0), 0) * 100) / 100;
-        const total  = Math.round((Object.values(amtMap).reduce((s, v) => s + v, 0) + extras) * 100) / 100;
-        return { apt, amtMap, extras, total };
+        const total  = Math.round(aptLines.reduce((s, l) => s + l.summa, 0) * 100) / 100;
+        return { apt, amtMap: posAmounts, extras, total };
       });
 
       const hdr6 = ["Dz.Nr.", "Īpašnieks", ...activePoz6.map(p => p.label), "Papildus", "KOPĀ"];
@@ -870,61 +923,13 @@ function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, comp
 
     for (const apt of merged) {
       const cfg = config[apt.dz] || {};
-      const cirkulGrupas = parseFloat(cfg.circGroup) || 0;
       const name = apt.owner || "";
       const payDay = String(cfg.payDay || 20).padStart(2, "0");
       const termiņš = `${payDay}.${mesCipars}.${gadam}`;
 
-      const rApsam   = Math.round(apt.area  * tApsam   * 100) / 100;
-      const rRem     = Math.round(apt.area  * tRem     * 100) / 100;
-      const rSiltmez = Math.round(apt.area  * tSiltmez * 100) / 100;
-      const rAU      = Math.round(apt.auKopa   * tAU      * 100) / 100;
-      const rKU      = Math.round(apt.kuKopa   * tKU      * 100) / 100;
-      const rCirk    = Math.round(cirkulGrupas * (cirkulTarif || 0) * 100) / 100;
-      const rApkM2   = Math.round(apt.maksPlatibaiArPVN  * 100) / 100;
-      const rApkAlok = Math.round(apt.maksVienibamArPVN  * 100) / 100;
-      const rKoplEl  = Math.round(tKoplEl * 100) / 100;
-      const atkritumiPerPers = totalPersonas > 0
-        ? Math.round(atkritumiKopa / totalPersonas * 10000) / 10000
-        : 0;
-      const rAtk = Math.round(atkritumiPerPers * (apt.residents || 0) * 100) / 100;
-
-      const auLines = apt.coldMeters.map(m => [
-        `Aukstā ūdens skaitītājs (${m.prev.toFixed(3)}–${m.cur.toFixed(3)})`,
-        "m³", m.pat, tAU, Math.round(m.pat * tAU * 100) / 100,
-      ]);
-      const kuLines = apt.hotMeters.map(m => [
-        `Karstā ūdens skaitītājs (${m.prev.toFixed(3)}–${m.cur.toFixed(3)})`,
-        "m³", m.pat, tKU, Math.round(m.pat * tKU * 100) / 100,
-      ]);
-
-      const effPoz = (pozicijas && pozicijas.length) ? pozicijas : DEFAULT_POZICIJAS.map(p=>({...p,on:true}));
-      const dzOff  = new Set(cfg.posDisabled || []);
-      const dzExtra = cfg.posExtra || [];
-      const posLines = [];
-      for (const poz of effPoz) {
-        if (!poz.on || dzOff.has(poz.id)) continue;
-        switch (poz.id) {
-          case "cirk":    if (cirkulGrupas>0) posLines.push(["Cirkulācija*",poz.mv,cirkulGrupas,cirkulTarif||0,rCirk]); break;
-          case "lietus":  posLines.push(["Lietus notekūdeņi",poz.mv,1,lietusMen,lietusMen]); break;
-          case "atk":     if (rAtk>0) posLines.push(["Atkritumu izvešana**",poz.mv,apt.residents||0,atkritumiPerPers,rAtk]); break;
-          case "koplEl":  posLines.push(["Koplietošanas elektrība***",poz.mv,1,tKoplEl,rKoplEl]); break;
-          case "apsam":   posLines.push(["Apsaimniekošana",poz.mv,apt.area,tApsam,rApsam]); break;
-          case "rem":     posLines.push(["Remontdarbu fonds",poz.mv,apt.area,tRem,rRem]); break;
-          case "siltmez": if (rSiltmez>0) posLines.push(["Siltummezgla apkalpošana",poz.mv,apt.area,tSiltmez,rSiltmez]); break;
-          case "apkM2":   if (men.heatingIncluded&&rApkM2>0) posLines.push([`Apkure (kopējā) ${men.heatingM2Pct||"40"}%`,poz.mv,apt.heatedArea,apt.cenaM2ArPVN,rApkM2]); break;
-          case "apkAlok": if (men.heatingIncluded&&rApkAlok>0) posLines.push([`Apkure (patēriņš) ${men.heatingAllocPct||"60"}%`,poz.mv,apt.alokVienibas,apt.cenaVienArPVN,rApkAlok]); break;
-        }
-      }
-      for (const ex of dzExtra) {
-        const s = parseFloat(ex.summa) || 0;
-        if (ex.label && s !== 0) posLines.push([ex.label,"€/dz.",1,s,s]);
-      }
-      const lines = [...auLines, ...kuLines, ...posLines];
-
-      const kopsumma = lines.reduce((s, l) => s + (typeof l[4] === "number" ? l[4] : 0), 0);
-      const nowMM = String(now.getMonth() + 1).padStart(2, "0");
-      const invoiceNr = `B${gadam}${nowMM}${String(rekNrSakums + rekIdx).padStart(4, "0")}`;
+      const { lines } = computeAptLines(apt, cfg, tariffs, pozicijas, men);
+      const kopsumma = lines.reduce((s, l) => s + l.summa, 0);
+      const invoiceNr = `B${gadam}${mesCipars}${String(rekNrSakums + rekIdx).padStart(4, "0")}`;
       rekIdx++;
 
       // Rindu veidošana
@@ -978,7 +983,7 @@ function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, comp
 
 
       const rDataStart = ri;
-      for (const l of lines) push([...l]);
+      for (const l of lines) push([l.nos, l.mv, l.daudz, l.cena, l.summa]);
       const rDataEnd = ri - 1;
 
       const rBl3 = push([...E]); merge(rBl3, 0, rBl3, 4);
@@ -997,7 +1002,7 @@ function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, comp
         commonElecKwh: men.commonElecKwh || '',
         heat: (parseFloat(men.heat)||0).toFixed(2),
         water: (parseFloat(men.water)||0).toFixed(2),
-        monthName: _MNES[_prevMes - 1], year: String(_prevYear),
+        monthName: MNES[_prevMes - 1], year: String(_prevYear),
         residents: String(apt.residents || 0),
         rAtk: rAtk.toFixed(2), kopsumma: kopsumma.toFixed(2),
         waterM3: (apt.auKopa + apt.kuKopa).toFixed(3),
@@ -1022,19 +1027,15 @@ function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, comp
 
       for (let i = rDataStart; i <= rDataEnd; i++) {
         const l = lines[i - rDataStart];
-        if (typeof l[2] === "number") { const a = XLSX.utils.encode_cell({r:i, c:2}); if (ws[a]) ws[a].z = "0.###"; }
-        if (typeof l[3] === "number") { const a = XLSX.utils.encode_cell({r:i, c:3}); if (ws[a]) ws[a].z = "0.00##"; }
-        if (typeof l[4] === "number") { const a = XLSX.utils.encode_cell({r:i, c:4}); if (ws[a]) ws[a].z = "0.00"; }
+        if (typeof l.daudz === "number") { const a = XLSX.utils.encode_cell({r:i, c:2}); if (ws[a]) ws[a].z = "0.###"; }
+        if (typeof l.cena  === "number") { const a = XLSX.utils.encode_cell({r:i, c:3}); if (ws[a]) ws[a].z = "0.00##"; }
+        if (typeof l.summa === "number") { const a = XLSX.utils.encode_cell({r:i, c:4}); if (ws[a]) ws[a].z = "0.00"; }
       }
       { const a = XLSX.utils.encode_cell({r: rKopa, c: 4}); if (ws[a]) ws[a].z = "0.00"; }
 
       // Times New Roman 10pt visām rēķina lapas šūnām
-      const rng = XLSX.utils.decode_range(ws["!ref"] || "A1");
-      for (let r = rng.s.r; r <= rng.e.r; r++) {
-        for (let c = rng.s.c; c <= rng.e.c; c++) {
-          const a = XLSX.utils.encode_cell({r, c});
-          if (ws[a]) ws[a].s = {...(ws[a].s||{}), font: {name:"Times New Roman", sz:10}};
-        }
+      for (const key of Object.keys(ws)) {
+        if (key[0] !== '!') ws[key].s = {...(ws[key].s||{}), font: {name:"Times New Roman", sz:10}};
       }
 
       ws["!pageSetup"] = {
@@ -1074,11 +1075,9 @@ function _buildInvoiceBlocks(atskaite, alokData, config, men, cirkulTarif, pozic
   const lietusMen  = Math.round(tLietus / 12 * 100) / 100;
 
   const _now = new Date();
-  const _MNES = ["Janvāris","Februāris","Marts","Aprīlis","Maijs","Jūnijs",
-                 "Jūlijs","Augusts","Septembris","Oktobris","Novembris","Decembris"];
   const gadam     = String(men.year     || _now.getFullYear());
   const mesCipars = String(men.monthNum || (_now.getMonth() + 1)).padStart(2, "0");
-  const mesVards  = men.monthName       || _MNES[_now.getMonth()];
+  const mesVards  = men.monthName       || MNES[_now.getMonth()];
   const _curMes   = parseInt(mesCipars) || 1;
   const _curYear  = parseInt(gadam);
   const _nextMes  = _curMes === 12 ? 1 : _curMes + 1;
@@ -1088,10 +1087,12 @@ function _buildInvoiceBlocks(atskaite, alokData, config, men, cirkulTarif, pozic
   const _prevMes   = _curMes === 1 ? 12 : _curMes - 1;
   const _prevYear  = _curMes === 1 ? _curYear - 1 : _curYear;
   const periodTxt  = `${gadam}. gada ${mesVards}`;
-  const period1Txt = `${String(_prevYear)}. gada ${_MNES[_prevMes - 1]}`;
+  const period1Txt = `${String(_prevYear)}. gada ${MNES[_prevMes - 1]}`;
 
   const atkritumiKopa  = parseFloat(men.waste) || 0;
   const totalPersonas  = merged.reduce((s, a) => s + (a.residents || 0), 0);
+  const atkritumiPerPers = totalPersonas > 0 ? Math.round(atkritumiKopa / totalPersonas * 10000) / 10000 : 0;
+  const aptTariffs = { tAU, tKU, tApsam, tRem, tSiltmez, tKoplEl, cirkulTarif, lietusMen, atkritumiPerPers };
 
   const now = new Date();
   const DAYS_LV   = ["svētdiena","pirmdiena","otrdiena","trešdiena","ceturtdiena","piektdiena","sestdiena"];
@@ -1114,63 +1115,14 @@ function _buildInvoiceBlocks(atskaite, alokData, config, men, cirkulTarif, pozic
   let htmlRekIdx = 0;
 
   for (const apt of merged) {
-    const cfg          = config[apt.dz] || {};
-    const cirkulGrupas = parseFloat(cfg.circGroup) || 0;
-    const name         = apt.owner || "";
+    const cfg  = config[apt.dz] || {};
+    const name = apt.owner || "";
     const payDay = String(cfg.payDay || 20).padStart(2, "0");
     const termiņš = `${payDay}.${mesCipars}.${gadam}`;
 
-    const rApsam   = Math.round(apt.area  * tApsam   * 100) / 100;
-    const rRem     = Math.round(apt.area  * tRem     * 100) / 100;
-    const rSiltmez = Math.round(apt.area  * tSiltmez * 100) / 100;
-    const rCirk    = Math.round(cirkulGrupas * (cirkulTarif || 0) * 100) / 100;
-    const rApkM2   = Math.round(apt.maksPlatibaiArPVN * 100) / 100;
-    const rApkAlok = Math.round(apt.maksVienibamArPVN * 100) / 100;
-    const rKoplEl  = Math.round(tKoplEl * 100) / 100;
-    const atkritumiPerPers = totalPersonas > 0
-      ? Math.round(atkritumiKopa / totalPersonas * 10000) / 10000 : 0;
-    const rAtk = Math.round(atkritumiPerPers * (apt.residents || 0) * 100) / 100;
-
-    const auLines = apt.coldMeters.map(m => ({
-      nos: `Aukstā ūdens skaitītājs (${m.prev.toFixed(3)}–${m.cur.toFixed(3)})`,
-      mv: "m³", daudz: m.pat, cena: tAU, summa: Math.round(m.pat * tAU * 100) / 100,
-    }));
-    const kuLines = apt.hotMeters.map(m => ({
-      nos: `Karstā ūdens skaitītājs (${m.prev.toFixed(3)}–${m.cur.toFixed(3)})`,
-      mv: "m³", daudz: m.pat, cena: tKU, summa: Math.round(m.pat * tKU * 100) / 100,
-    }));
-    const rAU = auLines.reduce((s, l) => s + l.summa, 0);
-    const rKU = kuLines.reduce((s, l) => s + l.summa, 0);
-
-    const effPoz = (pozicijas && pozicijas.length) ? pozicijas : DEFAULT_POZICIJAS.map(p=>({...p,on:true}));
-    const dzOff   = new Set(cfg.posDisabled || []);
-    const dzExtra = cfg.posExtra || [];
-    const posLines = [];
-    for (const poz of effPoz) {
-      if (!poz.on || dzOff.has(poz.id)) continue;
-      switch (poz.id) {
-        case "audensU": posLines.push(...auLines); break;
-        case "kudensU": posLines.push(...kuLines); break;
-        case "cirk":    if (cirkulGrupas>0) posLines.push({nos:"Cirkulācija*",mv:poz.mv,daudz:cirkulGrupas,cena:cirkulTarif||0,summa:rCirk}); break;
-        case "lietus":  posLines.push({nos:"Lietus notekūdeņi",mv:poz.mv,daudz:1,cena:lietusMen,summa:lietusMen}); break;
-        case "atk":     if (rAtk>0) posLines.push({nos:"Atkritumu izvešana**",mv:poz.mv,daudz:apt.residents||0,cena:atkritumiPerPers,summa:rAtk}); break;
-        case "koplEl":  posLines.push({nos:"Koplietošanas elektrība***",mv:poz.mv,daudz:1,cena:tKoplEl,summa:rKoplEl}); break;
-        case "apsam":   posLines.push({nos:"Apsaimniekošana",mv:poz.mv,daudz:apt.area,cena:tApsam,summa:rApsam}); break;
-        case "rem":     posLines.push({nos:"Remontdarbu fonds",mv:poz.mv,daudz:apt.area,cena:tRem,summa:rRem}); break;
-        case "siltmez": if (rSiltmez>0) posLines.push({nos:"Siltummezgla apkalpošana",mv:poz.mv,daudz:apt.area,cena:tSiltmez,summa:rSiltmez}); break;
-        case "apkM2":   if (men.heatingIncluded&&rApkM2>0) posLines.push({nos:`Apkure (kopējā) ${men.heatingM2Pct||"40"}%`,mv:poz.mv,daudz:apt.heatedArea,cena:apt.cenaM2ArPVN,summa:rApkM2}); break;
-        case "apkAlok": if (men.heatingIncluded&&rApkAlok>0) posLines.push({nos:`Apkure (patēriņš) ${men.heatingAllocPct||"60"}%`,mv:poz.mv,daudz:apt.alokVienibas,cena:apt.cenaVienArPVN,summa:rApkAlok}); break;
-      }
-    }
-    for (const ex of dzExtra) {
-      const s = parseFloat(ex.summa) || 0;
-      if (ex.label && s !== 0) posLines.push({nos:ex.label,mv:"€/dz.",daudz:1,cena:s,summa:s});
-    }
-
-    const lines    = [...posLines];
+    const { lines, rAU, rKU, rAtk, rKoplEl, rApkM2, rApkAlok } = computeAptLines(apt, cfg, aptTariffs, pozicijas, men);
     const kopsumma = lines.reduce((s, l) => s + l.summa, 0);
-    const nowMM = String(now.getMonth() + 1).padStart(2, "0");
-    const invoiceNr = `B${gadam}${nowMM}${String(rekNrSakumsHtml + htmlRekIdx).padStart(4, "0")}`;
+    const invoiceNr = `B${gadam}${mesCipars}${String(rekNrSakumsHtml + htmlRekIdx).padStart(4, "0")}`;
     htmlRekIdx++;
 
     const lineRows = lines.map(l => `
@@ -1187,7 +1139,7 @@ function _buildInvoiceBlocks(atskaite, alokData, config, men, cirkulTarif, pozic
     const fnCtx = {
       waste: (parseFloat(men.waste)||0).toFixed(2), commonElec: (parseFloat(men.commonElec)||0).toFixed(2),
       commonElecKwh: men.commonElecKwh || '', heat: (parseFloat(men.heat)||0).toFixed(2),
-      water: (parseFloat(men.water)||0).toFixed(2), monthName: _MNES[_prevMes - 1], year: String(_prevYear),
+      water: (parseFloat(men.water)||0).toFixed(2), monthName: MNES[_prevMes - 1], year: String(_prevYear),
       residents: String(apt.residents || 0), rAtk: rAtk.toFixed(2), kopsumma: kopsumma.toFixed(2),
       waterM3: (apt.auKopa + apt.kuKopa).toFixed(3), waterEur: (rAU + rKU).toFixed(2),
       heatMwh: men.heatMwh || '',
@@ -1442,6 +1394,7 @@ export default function App({ onBack }) {
   const [config,      setConfig]      = useState({});
   const [done,        setDone]        = useState(false);
   const [errPdf,      setErrPdf]      = useState("");
+  const [loadError,   setLoadError]   = useState("");
   const [emailSettings, setEmailSettings] = useState({
     subject: 'Rēķins Nr. {{invoiceNr}} par {{period}}, {{dz}}',
     body: '<p>Labdien, <strong>{{owner}}</strong>!</p>\n<p>Pievienots rēķins <strong>Nr. {{invoiceNr}}</strong> par <strong>{{period}}</strong>.</p>\n<p>Kopējā summa: <strong>{{kopsumma}} EUR</strong>.<br>Apmaksas termiņš: <strong>{{paymentDue}}</strong>.</p>\n<p>Ar cieņu <br>DZĪB Brīvības 166 Pārvaldnieks</p>',
@@ -1481,7 +1434,8 @@ export default function App({ onBack }) {
   // ── Ielādēt visus datus no DB vienā reizē ──
   useEffect(() => {
     // Dzīvokļu konfigurācija
-    supabase.from('apartment_config').select('*').then(({ data }) => {
+    supabase.from('apartment_config').select('*').then(({ data, error }) => {
+      if (error) { setLoadError(`Dzīvokļu konfigurācija: ${error.message}`); return; }
       if (data && data.length) {
         const cfg = {};
         for (const r of data) cfg[r.apt] = {
@@ -1495,7 +1449,8 @@ export default function App({ onBack }) {
     });
     // Mēneša iestatījumi
     supabase.from('settings').select('value').eq('key', 'monthly_settings').maybeSingle()
-      .then(({ data }) => {
+      .then(({ data, error }) => {
+        if (error) { setLoadError(`Mēneša iestatījumi: ${error.message}`); return; }
         if (data?.value) {
           const v = data.value;
           const period = v.period || (v.year && v.monthNum
@@ -1504,25 +1459,39 @@ export default function App({ onBack }) {
         }
       });
     // Rēķinu pozīcijas
-    supabase.from('invoice_positions').select('*').order('sort_order').then(({ data }) => {
+    supabase.from('invoice_positions').select('*').order('sort_order').then(({ data, error }) => {
+      if (error) { setLoadError(`Rēķinu pozīcijas: ${error.message}`); return; }
       if (data && data.length)
         setPozicijas(mergePoz(data.map(r => ({ id: r.id, label: r.label, mv: r.mv || '', on: r.is_on }))));
     });
     // Uzņēmuma rekvizīti
     supabase.from('settings').select('value').eq('key', 'company').maybeSingle()
-      .then(({ data }) => { if (data?.value) setCompany(prev => ({ ...prev, ...data.value })); });
+      .then(({ data, error }) => {
+        if (error) { console.error('company load:', error.message); return; }
+        if (data?.value) setCompany(prev => ({ ...prev, ...data.value }));
+      });
     // Zemsvītras piezīmes
     supabase.from('footnotes').select('*').order('sort_order')
-      .then(({ data }) => { if (data) setFootnotes(data); });
+      .then(({ data, error }) => {
+        if (error) { console.error('footnotes load:', error.message); return; }
+        if (data) setFootnotes(data);
+      });
     // Epasta iestatījumi
     supabase.from('settings').select('value').eq('key', 'email_settings').maybeSingle()
-      .then(({ data }) => { if (data?.value) setEmailSettings(prev => ({ ...prev, ...data.value })); });
+      .then(({ data, error }) => {
+        if (error) { console.error('email_settings load:', error.message); return; }
+        if (data?.value) setEmailSettings(prev => ({ ...prev, ...data.value }));
+      });
     // Iedzīvotāju e-pasta adreses
     supabase.from('settings').select('value').eq('key', 'owner_emails').maybeSingle()
-      .then(({ data }) => { if (data?.value) setOwnerEmails(data.value); });
+      .then(({ data, error }) => {
+        if (error) { console.error('owner_emails load:', error.message); return; }
+        if (data?.value) setOwnerEmails(data.value);
+      });
     // Pilno rēķinu konfigurācija
     supabase.from('settings').select('value').eq('key', 'full_invoice_config').maybeSingle()
-      .then(({ data }) => {
+      .then(({ data, error }) => {
+        if (error) { console.error('full_invoice_config load:', error.message); return; }
         if (data?.value) {
           const safe = {};
           for (const [k, v] of Object.entries(data.value)) {
@@ -1537,7 +1506,8 @@ export default function App({ onBack }) {
       });
     // Savstarpējie norēķini
     supabase.from('settings').select('value').eq('key', 'mutual_settlements').maybeSingle()
-      .then(({ data }) => {
+      .then(({ data, error }) => {
+        if (error) { console.error('mutual_settlements load:', error.message); return; }
         if (data?.value && typeof data.value === 'object') {
           setMutualSettl({
             persons: Array.isArray(data.value.persons) ? data.value.persons : [],
@@ -1547,7 +1517,10 @@ export default function App({ onBack }) {
       });
     // Papildu rēķini
     supabase.from('extra_invoices').select('*').order('created_at', { ascending: false })
-      .then(({ data }) => { if (data) setExtraInvoices(data); });
+      .then(({ data, error }) => {
+        if (error) { console.error('extra_invoices load:', error.message); return; }
+        if (data) setExtraInvoices(data);
+      });
     // PDF mapes (IndexedDB)
     _getFolderHandle('pdfFolder_regular').then(h => { if (h) setPdfFolderRegular(h); });
     _getFolderHandle('pdfFolder_tenant').then(h  => { if (h) setPdfFolderTenant(h); });
@@ -1674,7 +1647,11 @@ export default function App({ onBack }) {
 
   const updateCfg = (dz, field, val) => {
     const v = (field==="email" || field==="owner" || Array.isArray(val)) ? val : (parseFloat(val)||0);
-    setConfig(p => ({...p, [dz]: {...p[dz], [field]: v}}));
+    setConfig(p => {
+      const updatedApt = {...p[dz], [field]: v};
+      saveAptDb(dz, updatedApt);
+      return {...p, [dz]: updatedApt};
+    });
   };
   const saveCfgNow = () => { setConfig(prev => { saveCfgDb(prev); return prev; }); };
   const deleteCfg = async (dz) => {
@@ -1688,38 +1665,41 @@ export default function App({ onBack }) {
     setConfig(prev => {
       const off = prev[dz]?.posDisabled || [];
       const newOff = off.includes(posId) ? off.filter(x=>x!==posId) : [...off, posId];
-      const updated = {...prev, [dz]: {...prev[dz], posDisabled: newOff}};
-      saveCfgDb(updated); return updated;
+      const updatedApt = {...prev[dz], posDisabled: newOff};
+      saveAptDb(dz, updatedApt);
+      return {...prev, [dz]: updatedApt};
     });
   };
   const toggleDzFn = (dz, fnId) => {
     setConfig(prev => {
       const off = prev[dz]?.footnotesDisabled || [];
       const newOff = off.includes(fnId) ? off.filter(x=>x!==fnId) : [...off, fnId];
-      const updated = {...prev, [dz]: {...prev[dz], footnotesDisabled: newOff}};
-      saveCfgDb(updated); return updated;
+      const updatedApt = {...prev[dz], footnotesDisabled: newOff};
+      saveAptDb(dz, updatedApt);
+      return {...prev, [dz]: updatedApt};
     });
   };
   const addDzExtra = (dz) => {
     setConfig(prev => {
-      const extra = [...(prev[dz]?.posExtra||[]), {label:"",summa:""}];
-      const updated = {...prev, [dz]: {...prev[dz], posExtra: extra}};
-      saveCfgDb(updated); return updated;
+      const updatedApt = {...prev[dz], posExtra: [...(prev[dz]?.posExtra||[]), {label:"",summa:""}]};
+      saveAptDb(dz, updatedApt);
+      return {...prev, [dz]: updatedApt};
     });
   };
   const removeDzExtra = (dz, i) => {
     setConfig(prev => {
-      const extra = (prev[dz]?.posExtra||[]).filter((_,idx)=>idx!==i);
-      const updated = {...prev, [dz]: {...prev[dz], posExtra: extra}};
-      saveCfgDb(updated); return updated;
+      const updatedApt = {...prev[dz], posExtra: (prev[dz]?.posExtra||[]).filter((_,idx)=>idx!==i)};
+      saveAptDb(dz, updatedApt);
+      return {...prev, [dz]: updatedApt};
     });
   };
   const updateDzExtra = (dz, i, field, val) => {
     setConfig(prev => {
       const extra = [...(prev[dz]?.posExtra||[])];
       extra[i] = {...extra[i], [field]: val};
-      const updated = {...prev, [dz]: {...prev[dz], posExtra: extra}};
-      saveCfgDb(updated); return updated;
+      const updatedApt = {...prev[dz], posExtra: extra};
+      saveAptDb(dz, updatedApt);
+      return {...prev, [dz]: updatedApt};
     });
   };
 
@@ -1924,7 +1904,7 @@ export default function App({ onBack }) {
     const { logo, block } = await _buildExtraBlock(inv);
     const el = React.createElement(InvoiceDoc, { blocks: [block], logo });
     const pdfBlob = await pdfLib.pdf(el).toBlob();
-    const pdfBase64 = await new Promise(res => { const r = new FileReader(); r.onloadend = () => res(r.result.split(',')[1]); r.readAsDataURL(pdfBlob); });
+    const pdfBase64 = await blobToBase64(pdfBlob);
     const emailCtx = { owner: inv.owner, invoiceNr: inv.invoice_nr, period: inv.period1_txt, dz: inv.apts.join(', '), kopsumma: parseFloat(inv.total_eur).toFixed(2), paymentDue: inv.payment_due };
     const errs = [];
     for (const toEmail of emails) {
@@ -2004,7 +1984,7 @@ export default function App({ onBack }) {
       const emailCtx = { owner: block.owner, invoiceNr: block.invoiceNr, period: block.period1Txt, dz: apt, kopsumma: block.totalEur.toFixed(2), paymentDue: block.paymentDue };
       const el = React.createElement(InvoiceDoc, { blocks: [block], logo });
       const pdfBlob = await pdfLib.pdf(el).toBlob();
-      const pdfBase64 = await new Promise(res => { const r = new FileReader(); r.onloadend = () => res(r.result.split(',')[1]); r.readAsDataURL(pdfBlob); });
+      const pdfBase64 = await blobToBase64(pdfBlob);
       const { error } = await supabase.functions.invoke('send-invoice', {
         body: { to: toEmail, subject: renderFnText(subjTpl, emailCtx), html: renderFnText(bodyTpl, emailCtx), pdfBase64, filename },
       });
@@ -2107,9 +2087,7 @@ export default function App({ onBack }) {
 
     const sendPdf = async (el, toEmail, emailCtx, filename) => {
       const pdfBlob = await pdfLib.pdf(el).toBlob();
-      const pdfBase64 = await new Promise(res => {
-        const r = new FileReader(); r.onloadend = () => res(r.result.split(',')[1]); r.readAsDataURL(pdfBlob);
-      });
+      const pdfBase64 = await blobToBase64(pdfBlob);
       const { error } = await supabase.functions.invoke('send-invoice', {
         body: { to: toEmail, subject: renderFnText(emailSettings.subject, emailCtx), html: renderFnText(emailSettings.body, emailCtx), pdfBase64, filename },
       });
@@ -2145,7 +2123,7 @@ export default function App({ onBack }) {
       const bodyTpl = emailSettings.bodyIrnieki    || emailSettings.body;
       try {
         const pdfBlob = await pdfLib.pdf(React.createElement(InvoiceDoc, { blocks: [block], logo })).toBlob();
-        const pdfBase64 = await new Promise(res => { const r = new FileReader(); r.onloadend = () => res(r.result.split(',')[1]); r.readAsDataURL(pdfBlob); });
+        const pdfBase64 = await blobToBase64(pdfBlob);
         const { error } = await supabase.functions.invoke('send-invoice', {
           body: { to: toEmail, subject: renderFnText(subjTpl, emailCtx), html: renderFnText(bodyTpl, emailCtx), pdfBase64, filename: `Rekins_${block.invoiceNr}-${apt}.pdf` },
         });
@@ -2168,7 +2146,7 @@ export default function App({ onBack }) {
       try {
         const { logo: eLogo, block: eBlock } = await _buildExtraBlock(inv);
         const pdfBlob = await pdfLib.pdf(React.createElement(InvoiceDoc, { blocks: [eBlock], logo: eLogo })).toBlob();
-        const pdfBase64 = await new Promise(res => { const r = new FileReader(); r.onloadend = () => res(r.result.split(',')[1]); r.readAsDataURL(pdfBlob); });
+        const pdfBase64 = await blobToBase64(pdfBlob);
         const { error } = await supabase.functions.invoke('send-invoice', {
           body: { to: toEmail, subject: renderFnText(subjTpl, emailCtx), html: renderFnText(bodyTpl, emailCtx), pdfBase64, filename: `Rekins_${inv.invoice_nr||'papildu'}.pdf` },
         });
@@ -2470,6 +2448,12 @@ export default function App({ onBack }) {
         </div>
 
         <StepNav />
+
+        {loadError && (
+          <div className="status st-err" style={{margin:'8px 16px'}}>
+            ⚠ Datu bāzes ielādes kļūda: {loadError}
+          </div>
+        )}
 
         <div className="main">
 
