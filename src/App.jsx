@@ -3,9 +3,19 @@ import DzibCalculations from '../dzib_calculations'
 import { supabase } from '../supabase'
 import './App.css'
 
+const MONTHS_LV = ["Janvāris","Februāris","Marts","Aprīlis","Maijs","Jūnijs",
+                   "Jūlijs","Augusts","Septembris","Oktobris","Novembris","Decembris"]
+
+function formatPeriod(period) {
+  const [year, month] = period.split('-')
+  const m = parseInt(month)
+  return `${MONTHS_LV[m - 1] || month} ${year}`
+}
+
 function App() {
   const [page, setPage] = useState('home')
   const [mutualSettl, setMutualSettl] = useState({ persons: [], rows: [] })
+  const [docPeriods, setDocPeriods] = useState([])
 
   useEffect(() => {
     supabase.from('settings').select('value').eq('key', 'mutual_settlements').maybeSingle()
@@ -17,6 +27,29 @@ function App() {
           })
         }
       })
+  }, [])
+
+  useEffect(() => {
+    async function loadDocs() {
+      const { data: topItems } = await supabase.storage.from('Invoices').list('', {
+        limit: 100, sortBy: { column: 'name', order: 'desc' }
+      })
+      if (!topItems || topItems.length === 0) return
+      const folderItems = topItems.filter(item => !item.metadata)
+      const periods = await Promise.all(
+        folderItems.map(async folder => {
+          const { data: files } = await supabase.storage.from('Invoices').list(folder.name, {
+            limit: 200, sortBy: { column: 'name', order: 'asc' }
+          })
+          return {
+            period: folder.name,
+            files: (files || []).filter(f => f.metadata).map(f => f.name)
+          }
+        })
+      )
+      setDocPeriods(periods.filter(p => p.files.length > 0))
+    }
+    loadDocs()
   }, [])
 
   if (page === 'calculation') {
@@ -78,6 +111,35 @@ function App() {
           </section>
         )
       })()}
+
+      {docPeriods.length > 0 && (
+        <section id="dokumenti" className="section-alt">
+          <div className="section-inner">
+            <h2 className="section-title">Dokumenti</h2>
+            <div className="doc-periods">
+              {docPeriods.map(({ period, files }) => (
+                <div key={period} className="doc-period">
+                  <div className="doc-period-header">{formatPeriod(period)}</div>
+                  <div className="doc-files">
+                    {files.map(filename => {
+                      const url = supabase.storage.from('Invoices').getPublicUrl(`${period}/${filename}`).data.publicUrl
+                      const isXlsx = filename.endsWith('.xlsx')
+                      return (
+                        <div key={filename} className="doc-file">
+                          <span className={`doc-file-type ${isXlsx ? 'doc-xlsx' : 'doc-pdf'}`}>
+                            {isXlsx ? 'XLSX' : 'PDF'}
+                          </span>
+                          <a href={url} target="_blank" rel="noreferrer">{filename}</a>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
 
       <section id="kontakti" className="section-alt">
         <div className="section-inner">

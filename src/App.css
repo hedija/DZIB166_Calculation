@@ -212,6 +212,76 @@
 .norek-card.norek-neg .norek-amount { color: #c0392b; }
 
 
+/* ── Dokumenti ── */
+#dokumenti {
+  background: #f9fafb;
+}
+
+.doc-periods {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.doc-period {
+  border: 1px solid #dde4ee;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.doc-period-header {
+  background: #f5f7fa;
+  padding: 12px 20px;
+  font-weight: 600;
+  color: #1a1a2e;
+  font-size: 15px;
+  border-bottom: 1px solid #dde4ee;
+}
+
+.doc-files {
+  padding: 12px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.doc-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.doc-file-type {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.3px;
+  flex-shrink: 0;
+}
+
+.doc-xlsx {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.doc-pdf {
+  background: #fce8e6;
+  color: #c62828;
+}
+
+.doc-file a {
+  color: #2563eb;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.doc-file a:hover {
+  text-decoration: underline;
+}
+
 /* ── Footer ── */
 .footer {
   background: #1a1a2e;

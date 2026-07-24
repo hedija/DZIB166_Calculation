@@ -98,6 +98,13 @@ function blobToBase64(blob) {
   return blobToDataUrl(blob).then(d => d.split(',')[1]);
 }
 
+async function uploadToStorage(blob, storagePath) {
+  try {
+    const { error } = await supabase.storage.from('Invoices').upload(storagePath, blob, { upsert: true });
+    if (error) console.error('Storage upload:', storagePath, error.message);
+  } catch(e) { console.error('Storage upload:', storagePath, e); }
+}
+
 // ─── DB helpers ────────────────────────────────────────────────────────────
 function _aptToRow(dz, c) {
   return {
@@ -619,24 +626,26 @@ function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, comp
   const kuS=5+MAU*3; for(let i=0;i<MKU;i++){const b=kuS+i*3;fmt(ws1,"0.00",ds,b,ds+dr-1,b+2);}
   XLSX.utils.book_append_sheet(wb,ws1,"Skaitītāju rādījumi");
 
-  // Sheet 2
-  const pvnP=merged[0]?.pvnLikme??0;
-  const h2=["Dz.Nr.","Īpašnieks","PVN %","Cena/m²",`Cena/m² ar PVN`,"m²",`Maksa platībai ar PVN`,
-    "Cena/vienību",`Cena/vien. ar PVN`,"Alok. vien.",`Maksa vienībām ar PVN`,"Kopsumma ar PVN"];
-  const r2s=[[`ALOKATORU APRĒĶINS | ${alokData[0]?.periodNo||""}–${alokData[0]?.periodLidz||""}`],h2];
-  for(const a of merged) r2s.push([a.dz,a.owner,a.pvnLikme,a.cenaM2,a.cenaM2ArPVN,a.area,
-    a.maksPlatibaiArPVN,a.cenaVieniba,a.cenaVienArPVN,a.alokVienibas,a.maksVienibamArPVN,a.kopsumma]);
-  const d2e=2+merged.length;
-  r2s.push([],["KOPĀ","","","","",`=SUM(F3:F${d2e})`,`=SUM(G3:G${d2e})`,"","",
-    `=SUM(J3:J${d2e})`,`=SUM(K3:K${d2e})`,`=SUM(L3:L${d2e})`]);
-  const ws2=XLSX.utils.aoa_to_sheet(r2s);
-  ws2["!cols"]=[10,16,8,12,14,10,18,14,16,12,20,16].map(w=>({wch:w}));
-  const d2s=2,d2r=merged.length;
-  fmt(ws2,"0",d2s,2,d2s+d2r-1,2); fmt(ws2,"0.0000",d2s,3,d2s+d2r-1,4);
-  fmt(ws2,"0.00",d2s,5,d2s+d2r-1,5); fmt(ws2,"0.00",d2s,6,d2s+d2r-1,6);
-  fmt(ws2,"0.0000",d2s,7,d2s+d2r-1,8); fmt(ws2,"0.0000",d2s,9,d2s+d2r-1,9);
-  fmt(ws2,"0.00",d2s,10,d2s+d2r-1,11);
-  XLSX.utils.book_append_sheet(wb,ws2,"Alokatoru aprēķins");
+  // Sheet 2 — only when alokData is available
+  if (alokData && alokData.length) {
+    const pvnP=merged[0]?.pvnLikme??0;
+    const h2=["Dz.Nr.","Īpašnieks","PVN %","Cena/m²",`Cena/m² ar PVN`,"m²",`Maksa platībai ar PVN`,
+      "Cena/vienību",`Cena/vien. ar PVN`,"Alok. vien.",`Maksa vienībām ar PVN`,"Kopsumma ar PVN"];
+    const r2s=[[`ALOKATORU APRĒĶINS | ${alokData[0]?.periodNo||""}–${alokData[0]?.periodLidz||""}`],h2];
+    for(const a of merged) r2s.push([a.dz,a.owner,a.pvnLikme,a.cenaM2,a.cenaM2ArPVN,a.area,
+      a.maksPlatibaiArPVN,a.cenaVieniba,a.cenaVienArPVN,a.alokVienibas,a.maksVienibamArPVN,a.kopsumma]);
+    const d2e=2+merged.length;
+    r2s.push([],["KOPĀ","","","","",`=SUM(F3:F${d2e})`,`=SUM(G3:G${d2e})`,"","",
+      `=SUM(J3:J${d2e})`,`=SUM(K3:K${d2e})`,`=SUM(L3:L${d2e})`]);
+    const ws2=XLSX.utils.aoa_to_sheet(r2s);
+    ws2["!cols"]=[10,16,8,12,14,10,18,14,16,12,20,16].map(w=>({wch:w}));
+    const d2s=2,d2r=merged.length;
+    fmt(ws2,"0",d2s,2,d2s+d2r-1,2); fmt(ws2,"0.0000",d2s,3,d2s+d2r-1,4);
+    fmt(ws2,"0.00",d2s,5,d2s+d2r-1,5); fmt(ws2,"0.00",d2s,6,d2s+d2r-1,6);
+    fmt(ws2,"0.0000",d2s,7,d2s+d2r-1,8); fmt(ws2,"0.0000",d2s,9,d2s+d2r-1,9);
+    fmt(ws2,"0.00",d2s,10,d2s+d2r-1,11);
+    XLSX.utils.book_append_sheet(wb,ws2,"Alokatoru aprēķins");
+  }
 
   // Sheet 3
   const r3s=[["SKAITĪTĀJU REĢISTRS"],["Dzīvoklis","Īpašnieks","Tips","Skait.Nr.","Moduļa nr.","Nosaukums","Iepr.","Pašr.","Patēriņš"]];
@@ -927,7 +936,7 @@ function buildXlsx(atskaite, alokData, config, men, cirkulTarif, pozicijas, comp
       const payDay = String(cfg.payDay || 20).padStart(2, "0");
       const termiņš = `${payDay}.${mesCipars}.${gadam}`;
 
-      const { lines } = computeAptLines(apt, cfg, tariffs, pozicijas, men);
+      const { lines, rAU, rKU, rAtk, rKoplEl, rApkM2, rApkAlok } = computeAptLines(apt, cfg, tariffs, pozicijas, men);
       const kopsumma = lines.reduce((s, l) => s + l.summa, 0);
       const invoiceNr = `B${gadam}${mesCipars}${String(rekNrSakums + rekIdx).padStart(4, "0")}`;
       rekIdx++;
@@ -1342,14 +1351,6 @@ export default function App({ onBack }) {
   const [err1,     setErr1]     = useState("");
 
   // Siltuma kalkulators
-  const [sKopa,   setSKopa]   = useState("");
-  const [sTkud,   setSTkud]   = useState("55");
-  const [sTaud,   setSTaud]   = useState("15");
-  const [sC,      setSC]      = useState("1");
-  const [sK1,     setSK1]     = useState("1");
-  const [sK2,     setSK2]     = useState("0.8598");
-  const [sDzSk,   setSDzSk]   = useState("19.5");
-  const [sKoefC,  setSKoefC]  = useState("0.0728");
 
   // Fails 2
   const [file2,    setFile2]    = useState(null);
@@ -1387,12 +1388,26 @@ export default function App({ onBack }) {
     heatingIncluded:  true,
     heatingM2Pct:     "40",
     heatingAllocPct:  "60",
+    // Siltuma kalkulators
+    sHeatTkud:   "55",
+    sHeatTaud:   "15",
+    sHeatC:      "1",
+    sHeatK1:     "1",
+    sHeatK2:     "0.8598",
+    sHeatDzSk:   "19.5",
+    sHeatKoefC:  "0.0728",
   });
 
   const [company,     setCompany]     = useState({name:'',address:'',regNr:'',bank:'',swift:'',account:'',buildingId:'',logoPath:'',logoData:'',title:''});
   const [footnotes,   setFootnotes]   = useState([]);
   const [config,      setConfig]      = useState({});
   const [done,        setDone]        = useState(false);
+  const [pdfDone,          setPdfDone]          = useState(false);
+  const [pdfProgress,      setPdfProgress]      = useState("");
+  const [tenantPdfDone,    setTenantPdfDone]    = useState(false);
+  const [tenantPdfProgress,setTenantPdfProgress]= useState("");
+  const [extraPdfDone,     setExtraPdfDone]     = useState(false);
+  const [extraPdfProgress, setExtraPdfProgress] = useState("");
   const [errPdf,      setErrPdf]      = useState("");
   const [loadError,   setLoadError]   = useState("");
   const [emailSettings, setEmailSettings] = useState({
@@ -1553,7 +1568,7 @@ export default function App({ onBack }) {
   const readWb = async f => { const b=await f.arrayBuffer(); return XLSX.read(new Uint8Array(b),{type:"array"}); };
 
   const processF1 = useCallback(async f => {
-    setErr1(""); setDone(false);
+    setErr1(""); setDone(false); setPdfDone(false); setPdfProgress(""); setTenantPdfDone(false); setTenantPdfProgress("");
     try {
       await ensureXLSX();
       const r = parseAtskaite(await readWb(f), company.buildingId || "");
@@ -1584,7 +1599,7 @@ export default function App({ onBack }) {
   }, [config, company]);
 
   const processF2 = useCallback(async f => {
-    setErr2(""); setDone(false);
+    setErr2(""); setDone(false); setPdfDone(false); setPdfProgress("");
     try {
       await ensureXLSX();
       const r = parseAlokatori(await readWb(f));
@@ -2001,56 +2016,123 @@ export default function App({ onBack }) {
     }
   };
 
-  const handleSendEmails = async () => {
-    if (!atskaite || !alokData) return;
+  const _emailSetup = async () => {
+    const logo = await resolveLogo(company);
+    let blocks;
+    try {
+      ({ blocks } = _buildInvoiceBlocks(atskaite, alokData, config, men, effCirkulTarif, pozicijas, logo, company, footnotes));
+    } catch(e) { setErrPdf(e.message); setEmailSending(false); return null; }
+    let pdfLib, InvoiceDoc;
+    try {
+      [pdfLib, { InvoiceDocument: InvoiceDoc }] = await Promise.all([
+        import('@react-pdf/renderer'), import('./src/InvoicePdf.jsx'),
+      ]);
+    } catch(e) { setErrPdf("PDF bibliotēka nav pieejama: " + e.message); setEmailSending(false); return null; }
+    try { await ensureFonts(pdfLib); } catch(e) { setErrPdf("Fontu ielādes kļūda: " + e.message); setEmailSending(false); return null; }
+    return { logo, blocks, pdfLib, InvoiceDoc };
+  };
 
-    // ── 1. Pārbaudīt vai rēķini jau uzģenerēti ──
+  const _emailSendOne = async (pdfLib, el, toEmail, subj, body, filename) => {
+    const pdfBlob = await pdfLib.pdf(el).toBlob();
+    const pdfBase64 = await blobToBase64(pdfBlob);
+    const { error } = await supabase.functions.invoke('send-invoice', {
+      body: { to: toEmail, subject: subj, html: body, pdfBase64, filename },
+    });
+    if (error) {
+      let msg = error.message;
+      try { const txt = await error.context?.text?.(); if (txt) { const j = JSON.parse(txt); if (j?.error) msg = j.error; } } catch {}
+      throw new Error(msg);
+    }
+  };
+
+  const handleSendOwnerEmails = async () => {
+    if (!atskaite || (men.heatingIncluded && !alokData)) return;
     const periodYear  = parseInt(men.year  || new Date().getFullYear());
     const periodMonth = parseInt(men.monthNum || (new Date().getMonth() + 1));
     const periodLabel = `${periodYear}-${String(periodMonth).padStart(2, '0')}`;
 
-    const { data: existing } = await supabase
-      .from('issued_invoices').select('id')
-      .eq('period_year', periodYear).eq('period_month', periodMonth).limit(1);
-
-    const alreadyGenerated = Array.isArray(existing) && existing.length > 0;
-
-    if (!alreadyGenerated) {
-      if (!window.confirm(`Rēķini par ${periodLabel} vēl nav uzģenerēti.\nVai uzģenerēt un lejupielādēt PDF rēķinus tagad?`))
-        return;
+    const { data: existing } = await supabase.from('issued_invoices').select('id')
+      .eq('period_year', periodYear).eq('period_month', periodMonth)
+      .not('invoice_nr', 'like', 'S%').limit(1);
+    if (!(Array.isArray(existing) && existing.length > 0)) {
+      if (!window.confirm(`Īpašnieku rēķini par ${periodLabel} vēl nav uzģenerēti.\nVai uzģenerēt tagad?`)) return;
       const ok = await handleGeneratePdf();
       if (!ok) return;
     }
+    if (!window.confirm(`Izsūtīt īpašnieku rēķinus par ${periodLabel}?`)) return;
 
-    if (!window.confirm(`Izsūtīt rēķinus par ${periodLabel} uz norādītajām epasta adresēm?`))
-      return;
-
-    // ── 2. Sagatavot ──
     setEmailSending(true);
     setEmailProgress({ sent: 0, total: 0, errors: [], noEmail: [] });
     setErrPdf("");
 
-    const logo = await resolveLogo(company);
-
-    let blocks;
-    try {
-      ({ blocks } = _buildInvoiceBlocks(atskaite, alokData, config, men, effCirkulTarif, pozicijas, logo, company, footnotes));
-    } catch(e) { setErrPdf(e.message); setEmailSending(false); return; }
-
-    let pdfLib, InvoiceDoc;
-    try {
-      [pdfLib, { InvoiceDocument: InvoiceDoc }] = await Promise.all([
-        import('@react-pdf/renderer'),
-        import('./src/InvoicePdf.jsx'),
-      ]);
-    } catch(e) { setErrPdf("PDF bibliotēka nav pieejama: " + e.message); setEmailSending(false); return; }
-    try { await ensureFonts(pdfLib); } catch(e) { setErrPdf("Fontu ielādes kļūda: " + e.message); setEmailSending(false); return; }
+    const setup = await _emailSetup();
+    if (!setup) return;
+    const { logo, blocks, pdfLib, InvoiceDoc } = setup;
 
     const resolveEmail = b => (config[b.aptDz]?.email || ownerEmails[b.owner] || '').trim();
     const blocksWithEmail = blocks.filter(b => resolveEmail(b));
     const noEmail = blocks.filter(b => !resolveEmail(b)).map(b => `${b.aptDz} (${b.owner})`);
 
-    // ── Īrnieku bloki ar epasta adresi ──
+    const { data: extraForPeriod } = await supabase.from('extra_invoices').select('*')
+      .eq('period_year', periodYear).eq('period_month', periodMonth);
+    const extrasWithEmail = (extraForPeriod || []).filter(inv => {
+      const aptEmail = (inv.apts || []).map(a => config[a]?.email).find(e => e?.trim()) || '';
+      return (inv.email || aptEmail || ownerEmails[inv.owner] || '').trim();
+    });
+
+    setEmailProgress({ sent: 0, total: blocksWithEmail.length + extrasWithEmail.length, errors: [], noEmail });
+
+    let sent = 0;
+    for (const block of blocksWithEmail) {
+      const toEmail = resolveEmail(block);
+      const emailCtx = { owner: block.owner, invoiceNr: block.invoiceNr, period: block.period1Txt, dz: block.aptDz, kopsumma: block.totalEur.toFixed(2), paymentDue: block.paymentDue };
+      try {
+        await _emailSendOne(pdfLib, React.createElement(InvoiceDoc, { blocks: [block], logo }), toEmail,
+          renderFnText(emailSettings.subject, emailCtx), renderFnText(emailSettings.body, emailCtx),
+          `Rekins_${block.invoiceNr}-${block.aptDz}.pdf`);
+        sent++; setEmailProgress(prev => ({ ...prev, sent }));
+      } catch(e) {
+        const msg = e.message?.includes('Failed to send a request')
+          ? `Dz. ${block.aptDz}: Edge Function nav pieejama`
+          : `Dz. ${block.aptDz} (${toEmail}): ${e.message}`;
+        setEmailProgress(prev => ({ ...prev, errors: [...prev.errors, msg] }));
+      }
+      await new Promise(r => setTimeout(r, 300));
+    }
+    for (const inv of extrasWithEmail) {
+      const aptEmail = (inv.apts || []).map(a => config[a]?.email).find(e => e?.trim()) || '';
+      const toEmail = (inv.email || aptEmail || ownerEmails[inv.owner] || '').trim();
+      const emailCtx = { owner: inv.owner, invoiceNr: inv.invoice_nr || '', period: inv.period1_txt || '', dz: (inv.apts||[]).join(', '), kopsumma: parseFloat(inv.total_eur).toFixed(2), paymentDue: inv.payment_due };
+      try {
+        const { logo: eLogo, block: eBlock } = await _buildExtraBlock(inv);
+        await _emailSendOne(pdfLib, React.createElement(InvoiceDoc, { blocks: [eBlock], logo: eLogo }), toEmail,
+          renderFnText(emailSettings.subjectPapildu || emailSettings.subject, emailCtx),
+          renderFnText(emailSettings.bodyPapildu    || emailSettings.body,    emailCtx),
+          `Rekins_${inv.invoice_nr||'papildu'}.pdf`);
+        sent++; setEmailProgress(prev => ({ ...prev, sent }));
+      } catch(e) {
+        setEmailProgress(prev => ({ ...prev, errors: [...prev.errors, `Papildu rēķins ${inv.owner} (${toEmail}): ${e.message}`] }));
+      }
+      await new Promise(r => setTimeout(r, 300));
+    }
+    setEmailSending(false);
+  };
+
+  const handleSendTenantEmails = async () => {
+    if (!atskaite || (men.heatingIncluded && !alokData)) return;
+    const periodYear  = parseInt(men.year  || new Date().getFullYear());
+    const periodMonth = parseInt(men.monthNum || (new Date().getMonth() + 1));
+    const periodLabel = `${periodYear}-${String(periodMonth).padStart(2, '0')}`;
+    if (!window.confirm(`Izsūtīt īrnieku rēķinus par ${periodLabel}?`)) return;
+
+    setEmailSending(true);
+    setEmailProgress({ sent: 0, total: 0, errors: [], noEmail: [] });
+    setErrPdf("");
+
+    const setup = await _emailSetup();
+    if (!setup) return;
+    const { logo, blocks, pdfLib, InvoiceDoc } = setup;
+
     const alokIrnieksMapS = {};
     for (const al of (alokData || [])) { if (al.irnieks) alokIrnieksMapS[String(al.dz)] = al.irnieks; }
     const allAptIdsS = sortApts([...new Set([...Object.keys(alokIrnieksMapS), ...Object.keys(fullInvConfig)])]);
@@ -2069,101 +2151,30 @@ export default function App({ onBack }) {
           ? _buildFullBlock(apt, regBlock, c, pozicijas, company)
           : { ...regBlock, owner: alokIrnieksMapS[apt] };
       } catch { continue; }
-      const nr = regBlock.invoiceNr.replace(/^B/, 'S');
-      tenantBlock.invoiceNr = nr;
+      tenantBlock.invoiceNr = regBlock.invoiceNr.replace(/^B/, 'S');
       tenantBlocksWithEmail.push({ block: tenantBlock, email: tenantEmail, apt });
     }
 
-    // ── Papildu rēķini ar epasta adresi ──
-    const { data: extraForPeriod } = await supabase.from('extra_invoices').select('*')
-      .eq('period_year', periodYear).eq('period_month', periodMonth);
-    const extrasWithEmail = (extraForPeriod || []).filter(inv => {
-      const aptEmail = (inv.apts || []).map(a => config[a]?.email).find(e => e?.trim()) || '';
-      return (inv.email || aptEmail || ownerEmails[inv.owner] || '').trim();
-    });
-
-    const total = blocksWithEmail.length + tenantBlocksWithEmail.length + extrasWithEmail.length;
-    setEmailProgress({ sent: 0, total, errors: [], noEmail });
-
-    const sendPdf = async (el, toEmail, emailCtx, filename) => {
-      const pdfBlob = await pdfLib.pdf(el).toBlob();
-      const pdfBase64 = await blobToBase64(pdfBlob);
-      const { error } = await supabase.functions.invoke('send-invoice', {
-        body: { to: toEmail, subject: renderFnText(emailSettings.subject, emailCtx), html: renderFnText(emailSettings.body, emailCtx), pdfBase64, filename },
-      });
-      if (error) {
-        let msg = error.message;
-        try { const txt = await error.context?.text?.(); if (txt) { const j = JSON.parse(txt); if (j?.error) msg = j.error; } } catch {}
-        throw new Error(msg);
-      }
-    };
-
-    // ── 3. Sūtīt parastos rēķinus ──
+    setEmailProgress({ sent: 0, total: tenantBlocksWithEmail.length, errors: [], noEmail: [] });
     let sent = 0;
-    for (const block of blocksWithEmail) {
-      const toEmail = resolveEmail(block);
-      const emailCtx = { owner: block.owner, invoiceNr: block.invoiceNr, period: block.period1Txt, dz: block.aptDz, kopsumma: block.totalEur.toFixed(2), paymentDue: block.paymentDue };
-      try {
-        await sendPdf(React.createElement(InvoiceDoc, { blocks: [block], logo }), toEmail, emailCtx, `Rekins_${block.invoiceNr}-${block.aptDz}.pdf`);
-        sent++;
-        setEmailProgress(prev => ({ ...prev, sent }));
-      } catch(e) {
-        const msg = e.message?.includes('Failed to send a request')
-          ? `Dz. ${block.aptDz}: Edge Function nav pieejama — vai funkcija ir deploy-ota? (supabase functions deploy send-invoice)`
-          : `Dz. ${block.aptDz} (${toEmail}): ${e.message}`;
-        setEmailProgress(prev => ({ ...prev, errors: [...prev.errors, msg] }));
-      }
-      await new Promise(r => setTimeout(r, 300));
-    }
-
-    // ── 4. Sūtīt īrnieku rēķinus ──
     for (const { block, email: toEmail, apt } of tenantBlocksWithEmail) {
       const emailCtx = { owner: block.owner, invoiceNr: block.invoiceNr, period: block.period1Txt, dz: apt, kopsumma: block.totalEur.toFixed(2), paymentDue: block.paymentDue };
-      const subjTpl = emailSettings.subjectIrnieki || emailSettings.subject;
-      const bodyTpl = emailSettings.bodyIrnieki    || emailSettings.body;
       try {
-        const pdfBlob = await pdfLib.pdf(React.createElement(InvoiceDoc, { blocks: [block], logo })).toBlob();
-        const pdfBase64 = await blobToBase64(pdfBlob);
-        const { error } = await supabase.functions.invoke('send-invoice', {
-          body: { to: toEmail, subject: renderFnText(subjTpl, emailCtx), html: renderFnText(bodyTpl, emailCtx), pdfBase64, filename: `Rekins_${block.invoiceNr}-${apt}.pdf` },
-        });
-        if (error) { let msg = error.message; try { const txt = await error.context?.text?.(); if (txt) { const j = JSON.parse(txt); if (j?.error) msg = j.error; } } catch {} throw new Error(msg); }
-        sent++;
-        setEmailProgress(prev => ({ ...prev, sent }));
+        await _emailSendOne(pdfLib, React.createElement(InvoiceDoc, { blocks: [block], logo }), toEmail,
+          renderFnText(emailSettings.subjectIrnieki || emailSettings.subject, emailCtx),
+          renderFnText(emailSettings.bodyIrnieki    || emailSettings.body,    emailCtx),
+          `Rekins_${block.invoiceNr}-${apt}.pdf`);
+        sent++; setEmailProgress(prev => ({ ...prev, sent }));
       } catch(e) {
         setEmailProgress(prev => ({ ...prev, errors: [...prev.errors, `Īrnieks dz. ${apt} (${toEmail}): ${e.message}`] }));
       }
       await new Promise(r => setTimeout(r, 300));
     }
-
-    // ── 5. Sūtīt papildu rēķinus ──
-    for (const inv of extrasWithEmail) {
-      const aptEmail = (inv.apts || []).map(a => config[a]?.email).find(e => e?.trim()) || '';
-      const toEmail = (inv.email || aptEmail || ownerEmails[inv.owner] || '').trim();
-      const emailCtx = { owner: inv.owner, invoiceNr: inv.invoice_nr || '', period: inv.period1_txt || '', dz: (inv.apts||[]).join(', '), kopsumma: parseFloat(inv.total_eur).toFixed(2), paymentDue: inv.payment_due };
-      const subjTpl = emailSettings.subjectPapildu || emailSettings.subject;
-      const bodyTpl = emailSettings.bodyPapildu    || emailSettings.body;
-      try {
-        const { logo: eLogo, block: eBlock } = await _buildExtraBlock(inv);
-        const pdfBlob = await pdfLib.pdf(React.createElement(InvoiceDoc, { blocks: [eBlock], logo: eLogo })).toBlob();
-        const pdfBase64 = await blobToBase64(pdfBlob);
-        const { error } = await supabase.functions.invoke('send-invoice', {
-          body: { to: toEmail, subject: renderFnText(subjTpl, emailCtx), html: renderFnText(bodyTpl, emailCtx), pdfBase64, filename: `Rekins_${inv.invoice_nr||'papildu'}.pdf` },
-        });
-        if (error) { let msg = error.message; try { const txt = await error.context?.text?.(); if (txt) { const j = JSON.parse(txt); if (j?.error) msg = j.error; } } catch {} throw new Error(msg); }
-        sent++;
-        setEmailProgress(prev => ({ ...prev, sent }));
-      } catch(e) {
-        setEmailProgress(prev => ({ ...prev, errors: [...prev.errors, `Papildu rēķins ${inv.owner} (${toEmail}): ${e.message}`] }));
-      }
-      await new Promise(r => setTimeout(r, 300));
-    }
-
     setEmailSending(false);
   };
 
   const handleGenerate = async () => {
-    if(!atskaite||!alokData) return;
+    if(!atskaite||(men.heatingIncluded&&!alokData)) return;
     await ensureXLSX();
     const periodClean = atskaite.period.trim().replace(/\s*-\s*/g,"-");
     const parts = periodClean.split("-");
@@ -2216,16 +2227,27 @@ export default function App({ onBack }) {
       return [{ invoice_nr: nr, apt, owner: irnieks, supplier: null, recipient_address: regBlock.recipientAddress, payment_due: regBlock.paymentDue || '', lines: regBlock.lines, total_eur: regBlock.totalEur, renderedFootnotes: regBlock.renderedFootnotes || [] }];
     });
 
-    XLSX.writeFile(buildXlsx(atskaite,alokData,config,men,effCirkulTarif,pozicijas,company,footnotes,numberedExtras),`DZIB_Kopsavilkums_${yyyy}_${mm}.xlsx`,{cellStyles:true});
+    const _xlsxMime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    const fname1 = `DZIB_Kopsavilkums_${yyyy}_${mm}.xlsx`;
+    const buf1   = XLSX.write(buildXlsx(atskaite,alokData,config,men,effCirkulTarif,pozicijas,company,footnotes,numberedExtras),{bookType:'xlsx',type:'array',cellStyles:true});
+    const blob1  = new Blob([buf1], {type: _xlsxMime});
+    const a1 = document.createElement('a'); a1.href = URL.createObjectURL(blob1); a1.download = fname1; a1.click(); URL.revokeObjectURL(a1.href);
+    await uploadToStorage(blob1, `${menY}-${menM}/${fname1}`);
     if (fullInvsForXlsx.length) {
-      XLSX.writeFile(buildIrnieku(fullInvsForXlsx, mutualSettl), `DZIB_Irnieki_${yyyy}_${mm}.xlsx`, {cellStyles:true});
+      const fname2 = `DZIB_Irnieki_${yyyy}_${mm}.xlsx`;
+      const buf2   = XLSX.write(buildIrnieku(fullInvsForXlsx, mutualSettl),{bookType:'xlsx',type:'array',cellStyles:true});
+      const blob2  = new Blob([buf2], {type: _xlsxMime});
+      const a2 = document.createElement('a'); a2.href = URL.createObjectURL(blob2); a2.download = fname2; a2.click(); URL.revokeObjectURL(a2.href);
+      await uploadToStorage(blob2, `${menY}-${menM}/${fname2}`);
     }
     setDone(true);
   };
 
   const handleGeneratePdf = async () => {
-    if (!atskaite || !alokData) return;
+    if (!atskaite || (men.heatingIncluded && !alokData)) return;
     setErrPdf("");
+    setPdfDone(false);
+    setPdfProgress("Sagatavo...");
 
     const logo = await resolveLogo(company);
 
@@ -2254,12 +2276,20 @@ export default function App({ onBack }) {
       return false;
     }
 
-    for (const block of blocks) {
+    const _nowPdf = new Date();
+    const gadam2     = String(men.year     || _nowPdf.getFullYear());
+    const mesCipars2 = String(men.monthNum || (_nowPdf.getMonth()+1)).padStart(2,'0');
+
+    for (let bi = 0; bi < blocks.length; bi++) {
+      const block = blocks[bi];
+      setPdfProgress(`Rēķins ${bi + 1}/${blocks.length}: dz. ${block.aptDz}...`);
       try {
         const el = React.createElement(InvoiceDoc, { blocks: [block], logo });
         const blob = await pdfLib.pdf(el).toBlob();
         await savePdfBlob(blob, `Rekins_${block.invoiceNr}-${block.aptDz}.pdf`, pdfFolderRegular);
+        await uploadToStorage(blob, `${gadam2}-${mesCipars2}/Rekins_${block.invoiceNr}-${block.aptDz}.pdf`);
       } catch(e) {
+        setPdfProgress("");
         setErrPdf(`${block.aptDz}: ${e.message}`);
         return false;
       }
@@ -2282,9 +2312,6 @@ export default function App({ onBack }) {
     } catch(e) { console.error('saveInvoicesDb:', e); }
 
     // ── Extra invoices for this period ───────────────────────────────────────
-    const _now2 = new Date();
-    const gadam2     = String(men.year     || _now2.getFullYear());
-    const mesCipars2 = String(men.monthNum || (_now2.getMonth()+1)).padStart(2,'0');
     const periodYear2  = parseInt(gadam2);
     const periodMonth2 = parseInt(mesCipars2);
     const rekNrSakums2 = Math.max(1, parseInt(men.invoiceNrStart)||1);
@@ -2302,6 +2329,7 @@ export default function App({ onBack }) {
         const el = React.createElement(InvoiceDoc, { blocks: [eBlock], logo: eLogo });
         const blob = await pdfLib.pdf(el).toBlob();
         await savePdfBlob(blob, `Rekins_${newNr}.pdf`, pdfFolderRegular);
+        await uploadToStorage(blob, `${gadam2}-${mesCipars2}/Rekins_${newNr}.pdf`);
         await supabase.from('extra_invoices').update({ invoice_nr: newNr }).eq('id', inv.id);
         await supabase.from('issued_invoices').upsert({
           invoice_nr:   newNr,
@@ -2321,27 +2349,79 @@ export default function App({ onBack }) {
     }
     if (extraForPdf.length) await loadExtraInvoices();
 
-    // ── Tenant invoices — source: alokatoru Excel irnieks column ─────────────
-    // All apartments with irnieks set are included unless explicitly disabled (enabled===false)
+    setPdfProgress("");
+    setPdfDone(true);
+    return true;
+  };
+
+  const handleGenerateTenantPdf = async () => {
+    if (!atskaite || (men.heatingIncluded && !alokData)) return;
+    setErrPdf("");
+    setTenantPdfDone(false);
+    setTenantPdfProgress("Sagatavo...");
+
+    const logo = await resolveLogo(company);
+
+    let blocks;
+    try {
+      ({ blocks } = _buildInvoiceBlocks(atskaite, alokData, config, men, effCirkulTarif, pozicijas, logo, company, footnotes));
+    } catch(e) {
+      setTenantPdfProgress("");
+      setErrPdf(e.message);
+      return false;
+    }
+
+    let pdfLib, InvoiceDoc;
+    try {
+      [pdfLib, { InvoiceDocument: InvoiceDoc }] = await Promise.all([
+        import('@react-pdf/renderer'),
+        import('./src/InvoicePdf.jsx'),
+      ]);
+    } catch(e) {
+      setTenantPdfProgress("");
+      setErrPdf("PDF bibliotēka nav pieejama: " + e.message);
+      return false;
+    }
+    try {
+      await ensureFonts(pdfLib);
+    } catch(e) {
+      setTenantPdfProgress("");
+      setErrPdf("Fontu ielādes kļūda: " + e.message);
+      return false;
+    }
+
+    const _nowPdf = new Date();
+    const gadam2     = String(men.year     || _nowPdf.getFullYear());
+    const mesCipars2 = String(men.monthNum || (_nowPdf.getMonth()+1)).padStart(2,'0');
+    const periodYear2  = parseInt(gadam2);
+    const periodMonth2 = parseInt(mesCipars2);
+
     const alokIrnieksMap = {};
     for (const al of (alokData || [])) {
       if (al.irnieks) alokIrnieksMap[String(al.dz)] = al.irnieks;
     }
-    // include: irnieks from Excel (unless disabled) OR manually enabled without irnieks
     const allAptIds = sortApts([...new Set([...Object.keys(alokIrnieksMap), ...Object.keys(fullInvConfig)])]);
     const tenantApts = allAptIds.filter(apt => {
       const c = fullInvConfig[apt];
       return alokIrnieksMap[apt] ? c?.enabled !== false : !!c?.enabled;
     });
 
-    const downloadPdf = async (block, filename) => {
+    if (tenantApts.length === 0) {
+      setTenantPdfProgress("");
+      setErrPdf("Nav konfigurētu īrnieku. Pievienojiet īrniekus E-pasta iestatījumos vai alokatoru failā.");
+      return false;
+    }
+
+    const downloadTenantPdf = async (block, filename) => {
       const el = React.createElement(InvoiceDoc, { blocks: [block], logo });
       const blob = await pdfLib.pdf(el).toBlob();
       await savePdfBlob(blob, filename, pdfFolderTenant);
+      await uploadToStorage(blob, `${gadam2}-${mesCipars2}/${filename}`);
     };
 
     for (let fi = 0; fi < tenantApts.length; fi++) {
       const apt = tenantApts[fi];
+      setTenantPdfProgress(`Rēķins ${fi + 1}/${tenantApts.length}: dz. ${apt}...`);
       const regBlock = blocks.find(b => b.aptDz === apt);
       if (!regBlock) continue;
       const cfg = fullInvConfig[apt];
@@ -2350,6 +2430,7 @@ export default function App({ onBack }) {
         try {
           tenantBlock = _buildFullBlock(apt, regBlock, cfg, pozicijas, company);
         } catch(e) {
+          setTenantPdfProgress("");
           setErrPdf(`Īrnieka rēķins ${apt}: ${e.message}`);
           return false;
         }
@@ -2359,20 +2440,21 @@ export default function App({ onBack }) {
       const nr = regBlock.invoiceNr.replace(/^B/, 'S');
       tenantBlock.invoiceNr = nr;
       try {
-        await downloadPdf(tenantBlock, `Rekins_${nr}-${apt}.pdf`);
+        await downloadTenantPdf(tenantBlock, `Rekins_${nr}-${apt}.pdf`);
         await supabase.from('issued_invoices').upsert({
           invoice_nr: nr, apt, owner: tenantBlock.owner,
           period_year: periodYear2, period_month: periodMonth2,
           payment_due: tenantBlock.paymentDue, total_eur: tenantBlock.totalEur, lines: tenantBlock.lines,
         }, { onConflict: 'invoice_nr' });
       } catch(e) {
+        setTenantPdfProgress("");
         setErrPdf(`Īrnieka rēķins ${apt}: ${e.message}`);
         return false;
       }
       await new Promise(r => setTimeout(r, 300));
     }
 
-    // Refresh issued tenant invoices so mutual settlements see fresh data
+    // Refresh issued tenant invoices
     const pYr = parseInt(men.year || 0), pMo = parseInt(men.monthNum || 0);
     if (pYr && pMo) {
       const { data: refreshed } = await supabase.from('issued_invoices').select('*')
@@ -2380,14 +2462,109 @@ export default function App({ onBack }) {
       setIssuedTenantInvs((refreshed || []).filter(r => r.invoice_nr?.startsWith('S')));
     }
 
+    setTenantPdfProgress("");
+    setTenantPdfDone(true);
+    return true;
+  };
+
+  const handleGenerateExtraPdf = async () => {
+    setErrPdf("");
+    setExtraPdfDone(false);
+    setExtraPdfProgress("Sagatavo...");
+
+    let pdfLib, InvoiceDoc;
+    try {
+      [pdfLib, { InvoiceDocument: InvoiceDoc }] = await Promise.all([
+        import('@react-pdf/renderer'),
+        import('./src/InvoicePdf.jsx'),
+      ]);
+    } catch(e) {
+      setExtraPdfProgress("");
+      setErrPdf("PDF bibliotēka nav pieejama: " + e.message);
+      return false;
+    }
+    try {
+      await ensureFonts(pdfLib);
+    } catch(e) {
+      setExtraPdfProgress("");
+      setErrPdf("Fontu ielādes kļūda: " + e.message);
+      return false;
+    }
+
+    const _nowPdf = new Date();
+    const gadam2     = String(men.year     || _nowPdf.getFullYear());
+    const mesCipars2 = String(men.monthNum || (_nowPdf.getMonth()+1)).padStart(2,'0');
+    const periodYear2  = parseInt(gadam2);
+    const periodMonth2 = parseInt(mesCipars2);
+    const rekNrSakums2 = Math.max(1, parseInt(men.invoiceNrStart)||1);
+
+    const { data: _extraData, error: _extraErr } = await supabase.from('extra_invoices').select('*')
+      .eq('period_year', periodYear2).eq('period_month', periodMonth2);
+    if (_extraErr) {
+      setExtraPdfProgress("");
+      setErrPdf(`Papildu rēķinu DB kļūda: ${_extraErr.message}`);
+      return false;
+    }
+    const extraForPdf = _extraData || [];
+
+    if (extraForPdf.length === 0) {
+      setExtraPdfProgress("");
+      setErrPdf(`Nav papildu rēķinu periodam ${gadam2}-${mesCipars2}.`);
+      return false;
+    }
+
+    // Count already-issued owner invoices to determine numbering offset for new extras
+    const existingExtraNrs = new Set(extraForPdf.filter(e => e.invoice_nr).map(e => e.invoice_nr));
+    const { data: issuedData } = await supabase.from('issued_invoices').select('invoice_nr')
+      .eq('period_year', periodYear2).eq('period_month', periodMonth2);
+    const ownerCount = (issuedData || []).filter(r =>
+      r.invoice_nr && !r.invoice_nr.startsWith('S') && !existingExtraNrs.has(r.invoice_nr)
+    ).length;
+
+    let newExtraIdx = 0;
+    for (let ei = 0; ei < extraForPdf.length; ei++) {
+      const inv = extraForPdf[ei];
+      setExtraPdfProgress(`Papildu rēķins ${ei + 1}/${extraForPdf.length}: ${inv.owner}...`);
+      const newNr = inv.invoice_nr || `B${gadam2}${mesCipars2}${String(rekNrSakums2 + ownerCount + newExtraIdx++).padStart(4,'0')}`;
+      const invWithNr = { ...inv, invoice_nr: newNr };
+      try {
+        const { logo: eLogo, block: eBlock } = await _buildExtraBlock(invWithNr);
+        const el = React.createElement(InvoiceDoc, { blocks: [eBlock], logo: eLogo });
+        const blob = await pdfLib.pdf(el).toBlob();
+        await savePdfBlob(blob, `Rekins_${newNr}.pdf`, pdfFolderRegular);
+        await uploadToStorage(blob, `${gadam2}-${mesCipars2}/Rekins_${newNr}.pdf`);
+        if (!inv.invoice_nr) {
+          await supabase.from('extra_invoices').update({ invoice_nr: newNr }).eq('id', inv.id);
+        }
+        await supabase.from('issued_invoices').upsert({
+          invoice_nr:   newNr,
+          apt:          (inv.apts||[]).join(', '),
+          owner:        inv.owner,
+          period_year:  periodYear2,
+          period_month: periodMonth2,
+          payment_due:  inv.payment_due,
+          total_eur:    parseFloat(inv.total_eur) || 0,
+          lines:        inv.lines,
+        }, { onConflict: 'invoice_nr' });
+      } catch(e) {
+        setExtraPdfProgress("");
+        setErrPdf(`Papildu rēķins ${inv.owner}: ${e.message}`);
+        return false;
+      }
+      await new Promise(r => setTimeout(r, 300));
+    }
+
+    await loadExtraInvoices();
+    setExtraPdfProgress("");
+    setExtraPdfDone(true);
     return true;
   };
 
   // Siltums calc — KŪ no mājas kopējā skaitītāja "Brīvības iela 166"
   const kuM3 = atskaite?.kuKopaTotal ?? null;
-  const sk = { kopa:parseFloat(sKopa||men.heatMwh)||0, tkud:parseFloat(sTkud)||0, taud:parseFloat(sTaud)||0,
-    c:parseFloat(sC)||1, k1:parseFloat(sK1)||1, k2:parseFloat(sK2)||0.8598,
-    dzSk:parseFloat(sDzSk)||0, koefC:parseFloat(sKoefC)||0 };
+  const sk = { kopa:parseFloat(men.heatMwh)||0, tkud:parseFloat(men.sHeatTkud)||0, taud:parseFloat(men.sHeatTaud)||0,
+    c:parseFloat(men.sHeatC)||1, k1:parseFloat(men.sHeatK1)||1, k2:parseFloat(men.sHeatK2)||0.8598,
+    dzSk:parseFloat(men.sHeatDzSk)||0, koefC:parseFloat(men.sHeatKoefC)||0 };
   const q      = sk.k2>0 ? ((sk.tkud-sk.taud)/(1000*sk.k2))*sk.c*sk.k1 : 0;
   const qKud   = q*(kuM3??0);
   const qCirk  = sk.dzSk*sk.koefC;
@@ -3528,18 +3705,18 @@ export default function App({ onBack }) {
                     <SiltSec>Ievadlauки</SiltSec>
                     <SiltSec>No siltumapgādes rēķina</SiltSec>
                     <SiltInp label="Kopējais siltums (Qpieg.)"
-                      val={sKopa || men.heatMwh} set={setSKopa}
-                      unit="MWh" note={sKopa ? "Ievadīts manuāli" : men.heatMwh ? "No mēneša iestatījumiem" : "Ievadiet mēneša iestatījumos"} color="#1F4E79"/>
+                      val={men.heatMwh} set={v => updateMen('heatMwh', v)}
+                      unit="MWh" note={men.heatMwh ? "Saglabāts" : "Ievadiet mēneša iestatījumos"} color="#1F4E79"/>
                     <SiltSec>Ūdens temperatūras</SiltSec>
-                    <SiltInp label="Karstā ūdens t° (t°KŪ)" val={sTkud} set={setSTkud} unit="°C" note="Parasti 55°C" color="#8B3A00" st="1"/>
-                    <SiltInp label="Aukstā ūdens t° (t°AŪ)" val={sTaud} set={setSTaud} unit="°C" note="Parasti 15°C" color="#166d8e" st="1"/>
+                    <SiltInp label="Karstā ūdens t° (t°KŪ)" val={men.sHeatTkud} set={v => updateMen('sHeatTkud', v)} unit="°C" note="Parasti 55°C" color="#8B3A00" st="1"/>
+                    <SiltInp label="Aukstā ūdens t° (t°AŪ)" val={men.sHeatTaud} set={v => updateMen('sHeatTaud', v)} unit="°C" note="Parasti 15°C" color="#166d8e" st="1"/>
                     <SiltSec>Cirkulācija</SiltSec>
-                    <SiltInp label="Dzīvokļu / telpgrupu skaits" val={sDzSk} set={setSDzSk} unit="" note="Iekļaujot koplietošanas" color="#1F4E79" st="0.5"/>
-                    <SiltInp label="Koeficients C" val={sKoefC} set={setSKoefC} unit="" note="No normatīviem" color="#1F4E79" st="0.0001"/>
+                    <SiltInp label="Dzīvokļu / telpgrupu skaits" val={men.sHeatDzSk} set={v => updateMen('sHeatDzSk', v)} unit="" note="Iekļaujot koplietošanas" color="#1F4E79" st="0.5"/>
+                    <SiltInp label="Koeficients C" val={men.sHeatKoefC} set={v => updateMen('sHeatKoefC', v)} unit="" note="No normatīviem" color="#1F4E79" st="0.0001"/>
                     <SiltSec>Konstantes (mainīt reti)</SiltSec>
-                    <SiltInp label="c — ūdens siltumietilpība" val={sC} set={setSC} unit="" note="= 1" color="#595959" st="0.001"/>
-                    <SiltInp label="k1 — siltuma zudumi" val={sK1} set={setSK1} unit="" note="Plākšņu = 1.0" color="#595959" st="0.001"/>
-                    <SiltInp label="k2 — Gcal→MWh" val={sK2} set={setSK2} unit="" note="= 0.8598" color="#595959" st="0.0001"/>
+                    <SiltInp label="c — ūdens siltumietilpība" val={men.sHeatC} set={v => updateMen('sHeatC', v)} unit="" note="= 1" color="#595959" st="0.001"/>
+                    <SiltInp label="k1 — siltuma zudumi" val={men.sHeatK1} set={v => updateMen('sHeatK1', v)} unit="" note="Plākšņu = 1.0" color="#595959" st="0.001"/>
+                    <SiltInp label="k2 — Gcal→MWh" val={men.sHeatK2} set={v => updateMen('sHeatK2', v)} unit="" note="= 0.8598" color="#595959" st="0.0001"/>
                     <SiltSec>No Faila 1 (automātiski)</SiltSec>
                     <SiltInp label="KŪ patēriņš (mājas skaitītājs)" unit="m³" note='"Brīvības iela 166" kopējais skaitītājs' readOnly readVal={kuM3}/>
                   </div>
@@ -3598,17 +3775,20 @@ export default function App({ onBack }) {
                   </div>
                 </div>
                 <div className="card-body">
-                  <div className={`drop-zone${drag2?" drag":""}${alokData?" loaded":""}`}
-                    onDrop={onDrop2} onDragOver={e=>{e.preventDefault();setDrag2(true)}} onDragLeave={()=>setDrag2(false)}
-                    onClick={()=>ref2.current.click()}>
-                    <div className="drop-icon">{alokData?"✅":"📋"}</div>
-                    <div className="drop-label">{alokData?"Ielādēts — klikšķis nomaina":"Ievelciet xlsx vai noklikšķiniet"}</div>
-                    <div className="drop-sub">Cenas, alokatoru vienības, PVN likmes</div>
-                    {file2 && <div className="drop-name">📄 {file2.name}</div>}
-                    {alokData && <div className="drop-info">✓ {alokData.length} dzīvokļi · {alokData[0]?.periodNo}–{alokData[0]?.periodLidz}</div>}
-                  </div>
-                  <input ref={ref2} type="file" accept=".xlsx" style={{display:"none"}} onChange={e=>e.target.files[0]&&processF2(e.target.files[0])}/>
-                  {err2 && <div className="status st-err">⚠ {err2}</div>}
+                  {!men.heatingIncluded ? (
+                    <div className="status st-ok">✓ Alokatoru fails nav nepieciešams — apkures pozīcija nav aktīva</div>
+                  ) : <>
+                    <div className={`drop-zone${drag2?" drag":""}${alokData?" loaded":""}`}
+                      onDrop={onDrop2} onDragOver={e=>{e.preventDefault();setDrag2(true)}} onDragLeave={()=>setDrag2(false)}
+                      onClick={()=>ref2.current.click()}>
+                      <div className="drop-icon">{alokData?"✅":"📋"}</div>
+                      <div className="drop-label">{alokData?"Ielādēts — klikšķis nomaina":"Ievelciet xlsx vai noklikšķiniet"}</div>
+                      <div className="drop-sub">Cenas, alokatoru vienības, PVN likmes</div>
+                      {file2 && <div className="drop-name">📄 {file2.name}</div>}
+                      {alokData && <div className="drop-info">✓ {alokData.length} dzīvokļi · {alokData[0]?.periodNo}–{alokData[0]?.periodLidz}</div>}
+                    </div>
+                    <input ref={ref2} type="file" accept=".xlsx" style={{display:"none"}} onChange={e=>e.target.files[0]&&processF2(e.target.files[0])}/>
+                    {err2 && <div className="status st-err">⚠ {err2}</div>}
                   {showMappingDlg2 && pendingAlok && (
                     <div style={{marginTop:14,border:"2px solid #F9A825",borderRadius:8,overflow:"hidden"}}>
                       <div style={{background:"#FFF9C4",padding:"10px 14px",borderBottom:"1px solid #F9A825",display:"flex",alignItems:"center",gap:8}}>
@@ -3671,6 +3851,7 @@ export default function App({ onBack }) {
                       ✓ {alokData.length} dzīvokļi · PVN dati ielādēti
                     </div>
                   )}
+                  </>}
                 </div>
               </div>
               {alokData && atskaite && (
@@ -3716,7 +3897,7 @@ export default function App({ onBack }) {
                   </div>
                 </div>
               )}
-              <StepFooter step={3} onBack={()=>setStep(2)} onNext={()=>setStep(4)} canNext={!!alokData}/>
+              <StepFooter step={3} onBack={()=>setStep(2)} onNext={()=>setStep(4)} canNext={!!alokData || !men.heatingIncluded}/>
             </>
           )}
 
@@ -3724,24 +3905,26 @@ export default function App({ onBack }) {
           {step===4 && (
             <>
               {/* ── Bilances pārbaude ── */}
-              {atskaite && alokData && (() => {
+              {atskaite && (alokData || !men.heatingIncluded) && (() => {
                 const rijasUdens  = parseFloat(men.water) || 0;
                 const riasSiltums = parseFloat(men.heat)    || 0;
                 const tarifKU     = parseFloat(men.tarifHot)    || 0;
                 const tarifAU     = parseFloat(men.tarifCold)    || 0;
                 const tarifLietus = parseFloat(men.tarifRain)|| 0;
                 const kuM3b = tKU;
+                // When no alokData (heating disabled) use raw apartment readings from atskaite
+                const aptRows = merged.length ? merged : atskaite.apartments;
 
                 // G26 = Σ ROUND(auKopa × tarifAU, 2)
-                const auKopaSumma  = merged.reduce((s,a) => s + Math.round(a.auKopa * tarifAU * 100)/100, 0);
+                const auKopaSumma  = aptRows.reduce((s,a) => s + Math.round(a.auKopa * tarifAU * 100)/100, 0);
                 // H26 = Σ ROUND(kuKopa × tarifKU, 2)
-                const kuKopaSumma  = merged.reduce((s,a) => s + Math.round(a.kuKopa * tarifKU * 100)/100, 0);
+                const kuKopaSumma  = aptRows.reduce((s,a) => s + Math.round(a.kuKopa * tarifKU * 100)/100, 0);
                 // KŪ × AŪ tarifs = aukstā ūdens daļa no KŪ
-                const kuAuDala     = merged.reduce((s,a) => s + Math.round(a.kuKopa * tarifAU * 100)/100, 0);
+                const kuAuDala     = aptRows.reduce((s,a) => s + Math.round(a.kuKopa * tarifAU * 100)/100, 0);
                 // J26 = ROUND(tarifLietus/12, 2) × dzīvokļu skaits
-                const lietusSumma  = Math.round(tarifLietus / 12 * 100) / 100 * merged.length;
+                const lietusSumma  = Math.round(tarifLietus / 12 * 100) / 100 * aptRows.length;
                 // Cirkulācija = Σ ROUND(cirkulGrupas × effCirkulTarif, 2)
-                const cirkulSumma  = merged.reduce((s,a) => {
+                const cirkulSumma  = aptRows.reduce((s,a) => {
                   const grupas = parseFloat(config[a.dz]?.circGroup) || 0;
                   return s + Math.round(grupas * effCirkulTarif * 100) / 100;
                 }, 0);
@@ -3764,7 +3947,7 @@ export default function App({ onBack }) {
                   : tarifKU;
                 const kuKopaSummaKor = Math.round(kuM3b * tarifKUkor * 100) / 100;
                 const aprSiltumsKor = cirkulSumma + (kuKopaSummaKor - kuAuDala) + apkM2Summa + apkAlokSumma;
-                const hasData  = rijasUdens > 0 && riasSiltums > 0;
+                const hasData  = rijasUdens > 0 && (men.heatingIncluded ? riasSiltums > 0 : true);
                 const totalNesakrit = udensNesakrit + siltumNesakrit;
                 const balansOk = hasData && Math.abs(totalNesakrit) < 0.02;
                 const mesVards = men.monthName || men.monthNum || "—";
@@ -3858,24 +4041,24 @@ export default function App({ onBack }) {
                               {sep("Rīgas Ūdens")}
                               {row("  Aukstais ūdens",`${tAU.toFixed(3)} m³ × ${tarifAU} €/m³`,`${auSumma.toFixed(2)} €`,true)}
                               {row("  Karstais ūdens (ūdens daļa)",`${tKU.toFixed(3)} m³ × ${tarifAU} €/m³`,`${kuUdensDala.toFixed(2)} €`,true)}
-                              {row("  Lietus notekūdeņi",`${merged.length} dz. × ${(tarifLietus/12).toFixed(4)} €/dz.`,`${lietusSumma.toFixed(2)} €`,true)}
+                              {row("  Lietus notekūdeņi",`${aptRows.length} dz. × ${(tarifLietus/12).toFixed(4)} €/dz.`,`${lietusSumma.toFixed(2)} €`,true)}
                               {row("Rīgas Ūdens kopā","",`${aprUdens.toFixed(2)} €`,false,true)}
 
                               {sep("Rīgas Siltums")}
-                              {row("  Cirkulācija",`${merged.reduce((s,a)=>s+(parseFloat(config[a.dz]?.circGroup)||0),0).toFixed(1)} gr. × ${effCirkulTarif.toFixed(4)} €/gr.`,`${cirkulSumma.toFixed(2)} €`,true)}
+                              {row("  Cirkulācija",`${aptRows.reduce((s,a)=>s+(parseFloat(config[a.dz]?.circGroup)||0),0).toFixed(1)} gr. × ${effCirkulTarif.toFixed(4)} €/gr.`,`${cirkulSumma.toFixed(2)} €`,true)}
                               {row("  Karstais ūdens (siltuma daļa)",`${tKU.toFixed(3)} m³ × (${tarifKU} − ${tarifAU}) €/m³`,`${kuSiltDala.toFixed(2)} €`,true)}
                               {row("  Apkure m² (alokatoru maksa platībai)","Σ ROUND(m² × cena/m² ar PVN, 2)",`${apkM2Summa.toFixed(2)} €`,true)}
                               {row("  Apkure alok. (alokatoru vienību maksa)","Σ ROUND(vien. × cena/vien. ar PVN, 2)",`${apkAlokSumma.toFixed(2)} €`,true)}
                               {row("Rīgas Siltums kopā","",`${aprSiltums.toFixed(2)} €`,false,true)}
 
-                              {!balansOk && riasSiltums > 0 && sep(`Koriģētais aprēķins — KŪ tarifs ${tarifKUkor.toFixed(4)} €/m³ absorbē Ūdens iztrūkumu (${fmt(udensNesakrit)} €)`)}
-                              {!balansOk && riasSiltums > 0 && row("  Karstais ūdens (siltuma daļa, kor.)",`${tKU.toFixed(3)} m³ × (${tarifKUkor.toFixed(4)} − ${tarifAU}) €/m³`,`${(kuKopaSummaKor - kuAuDala).toFixed(2)} €`,true)}
-                              {!balansOk && riasSiltums > 0 && row("Rīgas Siltums (koriģēts)",`= ${riasSiltums.toFixed(2)} + (${fmt(udensNesakrit)}) €`,`${aprSiltumsKor.toFixed(2)} €`,false,true)}
-                              {!balansOk && riasSiltums > 0 && row("Kopā pēc korekcijas","Ūdens + Siltums kor.",`${(aprUdens + aprSiltumsKor).toFixed(2)} €`,false,true)}
+                              {!balansOk && hasData && sep(`Koriģētais aprēķins — KŪ tarifs ${tarifKUkor.toFixed(4)} €/m³ absorbē Ūdens iztrūkumu (${fmt(udensNesakrit)} €)`)}
+                              {!balansOk && hasData && row("  Karstais ūdens (siltuma daļa, kor.)",`${tKU.toFixed(3)} m³ × (${tarifKUkor.toFixed(4)} − ${tarifAU}) €/m³`,`${(kuKopaSummaKor - kuAuDala).toFixed(2)} €`,true)}
+                              {!balansOk && hasData && row("Rīgas Siltums (koriģēts)",`= ${riasSiltums.toFixed(2)} + (${fmt(udensNesakrit)}) €`,`${aprSiltumsKor.toFixed(2)} €`,false,true)}
+                              {!balansOk && hasData && row("Kopā pēc korekcijas","Ūdens + Siltums kor.",`${(aprUdens + aprSiltumsKor).toFixed(2)} €`,false,true)}
                             </tbody>
                           </table>
                           <div style={{marginTop:8,color:"#aab8c5",lineHeight:1.7}}>
-                            KŪ pa dzīvokļiem: {merged.map(a=>`${a.dz}: ${a.kuKopa.toFixed(3)}`).join(" · ")}
+                            KŪ pa dzīvokļiem: {aptRows.map(a=>`${a.dz}: ${a.kuKopa.toFixed(3)}`).join(" · ")}
                           </div>
                         </div>
                       );
@@ -3939,22 +4122,48 @@ export default function App({ onBack }) {
                     Ģenerētais fails saturēs 4 lapas: <b>Skaitītāju rādījumi · Alokatoru aprēķins · Skaitītāju reģistrs · Dzīvokļu konfigurācija</b>
                   </div>
 
-                  <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-                    <button className="btn-primary" style={{flex:"2 1 240px"}} disabled={!atskaite||!alokData} onClick={handleGenerate}>
-                      <span style={{fontSize:18}}>⚡</span>
-                      {atskaite ? `Ģenerēt DZIB_Kopsavilkums_${(atskaite.period.trim().split("-")[0]||"YYYY")}_${(atskaite.period.trim().split("-")[1]||"MM").padStart(2,"0")}.xlsx` : "Ģenerēt DZIB_Kopsavilkums_YYYY_MM.xlsx"}
-                    </button>
-                    <button className="btn-secondary" disabled={!atskaite||!alokData} onClick={handleGeneratePdf}>
-                      <span style={{fontSize:18}}>🖨</span>
-                      Ģenerēt PDF rēķinus
-                    </button>
-                    <button className="btn-secondary" disabled={!atskaite||!alokData||emailSending} onClick={handleSendEmails}
-                      style={{background: emailSending ? "#c8dce8" : undefined}}>
-                      <span style={{fontSize:18}}>✉</span>
-                      {emailSending ? `Sūta ${emailProgress.sent}/${emailProgress.total}...` : "Izsūtīt rēķinus"}
-                    </button>
+                  <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                    <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+                      <span style={{fontSize:11,fontWeight:600,color:"#5a7a90",textTransform:"uppercase",letterSpacing:1,minWidth:90}}>Ģenerēt</span>
+                      <button className="btn-primary" style={{flex:"2 1 220px"}} disabled={!atskaite||(men.heatingIncluded&&!alokData)} onClick={handleGenerate}>
+                        <span style={{fontSize:18}}>⚡</span>
+                        {atskaite ? `DZIB_Kopsavilkums_${(atskaite.period.trim().split("-")[0]||"YYYY")}_${(atskaite.period.trim().split("-")[1]||"MM").padStart(2,"0")}.xlsx` : "DZIB_Kopsavilkums_YYYY_MM.xlsx"}
+                      </button>
+                      <button className="btn-secondary" disabled={!atskaite||(men.heatingIncluded&&!alokData)} onClick={handleGeneratePdf}>
+                        <span style={{fontSize:18}}>🖨</span>
+                        Īpašnieku rēķini
+                      </button>
+                      <button className="btn-secondary" disabled={!atskaite||(men.heatingIncluded&&!alokData)} onClick={handleGenerateTenantPdf}>
+                        <span style={{fontSize:18}}>🏠</span>
+                        Īrnieku rēķini
+                      </button>
+                      <button className="btn-secondary" disabled={!men.year||!men.monthNum} onClick={handleGenerateExtraPdf}>
+                        <span style={{fontSize:18}}>📄</span>
+                        Papildu rēķini
+                      </button>
+                    </div>
+                    {done && <div className="status st-ok">✅ Fails lejupielādēts! · {merged.length} dzīvokļi · {atskaite?.period}</div>}
+                    {pdfProgress && <div className="status st-warn">⏳ {pdfProgress}</div>}
+                    {pdfDone && <div className="status st-ok">✅ Īpašnieku rēķini ģenerēti! · {atskaite?.period}</div>}
+                    {tenantPdfProgress && <div className="status st-warn">⏳ {tenantPdfProgress}</div>}
+                    {tenantPdfDone && <div className="status st-ok">✅ Īrnieku rēķini ģenerēti! · {atskaite?.period}</div>}
+                    {extraPdfProgress && <div className="status st-warn">⏳ {extraPdfProgress}</div>}
+                    {extraPdfDone && <div className="status st-ok">✅ Papildu rēķini ģenerēti! · {men.year}-{String(men.monthNum||'').padStart(2,'0')}</div>}
+
+                    <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+                      <span style={{fontSize:11,fontWeight:600,color:"#5a7a90",textTransform:"uppercase",letterSpacing:1,minWidth:90}}>Izsūtīt</span>
+                      <button className="btn-secondary" disabled={!atskaite||(men.heatingIncluded&&!alokData)||emailSending} onClick={handleSendOwnerEmails}
+                        style={{background: emailSending ? "#c8dce8" : undefined}}>
+                        <span style={{fontSize:18}}>✉</span>
+                        {emailSending ? `Sūta ${emailProgress.sent}/${emailProgress.total}...` : "Īpašnieku rēķini"}
+                      </button>
+                      <button className="btn-secondary" disabled={!atskaite||(men.heatingIncluded&&!alokData)||emailSending} onClick={handleSendTenantEmails}
+                        style={{background: emailSending ? "#c8dce8" : undefined}}>
+                        <span style={{fontSize:18}}>🏠</span>
+                        {emailSending ? `Sūta ${emailProgress.sent}/${emailProgress.total}...` : "Īrnieku rēķini"}
+                      </button>
+                    </div>
                   </div>
-                  {done && <div className="status st-ok">✅ Fails lejupielādēts! · {merged.length} dzīvokļi · {atskaite?.period}</div>}
 
                   {/* ── Atsevišķu rēķinu nosūtīšana ── */}
                   {atskaite && alokData && (() => {
@@ -4031,9 +4240,9 @@ export default function App({ onBack }) {
                     </div>
                   )}
                   {errPdf && <div className="status st-err">⚠ PDF kļūda: {errPdf}</div>}
-                  {(!atskaite||!alokData) && (
+                  {(!atskaite||(men.heatingIncluded&&!alokData)) && (
                     <div className="status st-warn">
-                      ⚠ {!atskaite?"Nepieciešams Fails 1 (1. solis)":""}{!atskaite&&!alokData?" un ":""}{!alokData?"Nepieciešams Fails 2 (3. solis)":""}
+                      ⚠ {!atskaite?"Nepieciešams Fails 1 (1. solis)":""}{!atskaite&&men.heatingIncluded&&!alokData?" un ":""}{men.heatingIncluded&&!alokData?"Nepieciešams Fails 2 (3. solis)":""}
                     </div>
                   )}
                 </div>

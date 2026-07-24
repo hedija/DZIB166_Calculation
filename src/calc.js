@@ -7,7 +7,7 @@ export function renderFnText(text, ctx) {
 
 export function mergeData(atskaite, alokData, config) {
   const am = {};
-  for (const a of alokData) am[a.dz] = a;
+  for (const a of (alokData || [])) am[a.dz] = a;
   return atskaite.apartments.map(apt => {
     const al = am[apt.dz] || {}, cfg = config[apt.dz] || {};
     const cenaM2     = al.cenaM2     ?? 0;
