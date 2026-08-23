@@ -66,7 +66,8 @@ export function calcAptBill(apt, tariffs, atkritumiPerPers, cfg = {}, heatingInc
 }
 
 export function numVardiem(amount) {
-  const cents = Math.round(amount * 100);
+  const neg   = amount < 0;
+  const cents = Math.round(Math.abs(amount) * 100);
   const eur   = Math.floor(cents / 100);
   const cnt   = cents % 100;
   const ones  = ["","viens","divi","trīs","četri","pieci","seši","septiņi","astoņi","deviņi"];
@@ -99,5 +100,6 @@ export function numVardiem(amount) {
     s = (th === 1 ? "tūkstotis" : nn(th) + " tūkstoši") + (re ? " " + nnn(re) : "") + " eiro";
   }
   s += cnt === 0 ? " 00 centu" : " " + String(cnt).padStart(2, "0") + " centi";
-  return s.charAt(0).toUpperCase() + s.slice(1);
+  const cap = s.charAt(0).toUpperCase() + s.slice(1);
+  return neg ? "Mīnus " + cap.charAt(0).toLowerCase() + cap.slice(1) : cap;
 }
