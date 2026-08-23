@@ -17,9 +17,10 @@ function App() {
   const [mutualSettl, setMutualSettl] = useState({ persons: [], rows: [] })
   const [docPeriods, setDocPeriods] = useState([])
 
-  useEffect(() => {
+  const loadMutualSettl = () => {
     supabase.from('settings').select('value').eq('key', 'mutual_settlements').maybeSingle()
-      .then(({ data }) => {
+      .then(({ data, error }) => {
+        if (error) { console.error('mutual_settlements load:', error.message); return; }
         if (data?.value && typeof data.value === 'object') {
           setMutualSettl({
             persons: Array.isArray(data.value.persons) ? data.value.persons : [],
@@ -27,7 +28,9 @@ function App() {
           })
         }
       })
-  }, [])
+  }
+
+  useEffect(() => { loadMutualSettl() }, [])
 
   useEffect(() => {
     async function loadDocs() {
@@ -53,7 +56,7 @@ function App() {
   }, [])
 
   if (page === 'calculation') {
-    return <DzibCalculations onBack={() => setPage('home')} />
+    return <DzibCalculations onBack={() => { setPage('home'); loadMutualSettl() }} />
   }
 
   return (

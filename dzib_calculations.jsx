@@ -1739,10 +1739,10 @@ export default function App({ onBack }) {
   };
   const togglePozId = (id) => updatePoz(pozicijas.map(p => p.id===id ? {...p,on:!p.on} : p));
 
-  const saveEmailSettings = (upd) => {
-    const next = upd ? { ...emailSettings, ...upd } : emailSettings;
-    if (upd) setEmailSettings(next);
-    supabase.from('settings').upsert({ key: 'email_settings', value: next }).catch(e => console.error('saveEmailSettings:', e));
+  const saveEmailSettings = (next) => {
+    supabase.from('settings')
+      .upsert({ key: 'email_settings', value: next }, { onConflict: 'key' })
+      .then(({ error }) => { if (error) console.error('saveEmailSettings:', error.message); });
   };
   const saveOwnerEmails = (emails) => {
     supabase.from('settings').upsert({ key: 'owner_emails', value: emails })
@@ -2981,16 +2981,22 @@ export default function App({ onBack }) {
                       <div style={{marginBottom:8}}>
                         <div style={{fontWeight:600,fontSize:11,color:'#444',marginBottom:3}}>Temats (Subject)</div>
                         <input type="text" value={emailSettings[key]||''}
-                          onChange={e => setEmailSettings(prev => ({...prev, [key]: e.target.value}))}
-                          onBlur={() => saveEmailSettings()}
+                          onChange={e => {
+                            const next = {...emailSettings, [key]: e.target.value};
+                            setEmailSettings(next);
+                            saveEmailSettings(next);
+                          }}
                           style={{width:'100%',padding:'6px 8px',border:'1px solid #c8dce8',borderRadius:5,fontSize:12,boxSizing:'border-box'}}
                           placeholder="Rēķins Nr. {{invoiceNr}} par {{period}}" />
                       </div>
                       <div>
                         <div style={{fontWeight:600,fontSize:11,color:'#444',marginBottom:3}}>Epasta teksts (HTML)</div>
                         <textarea value={emailSettings[keyBody]||''}
-                          onChange={e => setEmailSettings(prev => ({...prev, [keyBody]: e.target.value}))}
-                          onBlur={() => saveEmailSettings()}
+                          onChange={e => {
+                            const next = {...emailSettings, [keyBody]: e.target.value};
+                            setEmailSettings(next);
+                            saveEmailSettings(next);
+                          }}
                           rows={6}
                           style={{width:'100%',padding:'6px 8px',border:'1px solid #c8dce8',borderRadius:5,fontSize:11,fontFamily:'monospace',resize:'vertical',boxSizing:'border-box'}} />
                       </div>
